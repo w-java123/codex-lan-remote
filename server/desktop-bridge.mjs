@@ -1,23 +1,29 @@
 import { EventEmitter } from 'node:events';
 import { DesktopIpcClient } from './desktop-ipc.mjs';
 import { ThreadState, getTurns, summarizeThread, activeTurn } from './thread-state.mjs';
-import { pendingQuestions, validateAnswers } from './user-questions.mjs';
+import { pendingQuestions, pendingAttention, validateAnswers } from './user-questions.mjs';
 import { randomUUID } from 'node:crypto';
+import { messageInput } from './message-input.mjs';
 
 export class DesktopBridge extends EventEmitter {
-  constructor(threads, { clientFactory = options => new DesktopIpcClient(options), historyReader,backgroundHistoryReader=historyReader, allowSelectedChats = false,chatCreator } = {}) {
+  constructor(threads, { clientFactory = options => new DesktopIpcClient(options), historyReader,backgroundHistoryReader=historyReader, allowSelectedChats = false,chatCreator,autoTitles,openDesktopChat } = {}) {
     super();
     this.entries = new Map(threads.map(thread => [thread.id, { ...thread, writable: true, history: [], store: new ThreadState(), ready: false, consumed: new Set() }]));
     this.historyReader = historyReader;
     this.backgroundHistoryReader=backgroundHistoryReader;
     this.allowSelectedChats = allowSelectedChats;
     this.chatCreator=chatCreator;
+    this.autoTitles=autoTitles;
+    this.openDesktopChat = openDesktopChat;
     this.catalogRows = threads;
     this.clientFactory = clientFactory;
     this.generation = 0;
     this.closed = false;
     this.refreshTimer = setInterval(() => {
-      if (!this.closed && this.client?.initialized) for (const entry of this.entries.values()) if (!entry.ready) void this.hydrate(entry, this.generation);
+      if (!this.closed && this.client?.initialized) for (const entry of this.entries.values()) {
+        if (!entry.ready) void this.hydrate(entry, this.generation);
+        else void this.refreshQueue(entry,this.generation);
+      }
     }, 10000);
     this.refreshTimer.unref();
   }
@@ -28,12 +34,16 @@ export class DesktopBridge extends EventEmitter {
     for (const entry of this.entries.values()) { entry.ready = false; }
     const client = this.clientFactory({ controlThreadIds: [...this.entries.values()].filter(entry => entry.writable).map(entry => entry.id), timeoutMs: 30000 });
     this.client = client;
-    client.on('queuedMessages',({conversationId,messages})=>{if(generation!==this.generation)return;const entry=this.entries.get(conversationId);if(!entry)return;entry.nativeQueue=messages;entry.queueEpoch=(entry.queueEpoch||0)+1;this.emit('changed');});
+    client.on('queuedMessages',({conversationId,messages})=>{
+      if(generation!==this.generation)return;const entry=this.entries.get(conversationId);if(!entry)return;
+      const server=(entry.nativeQueue||[]).filter(row=>row.serverQueue),clients=new Set(server.map(row=>row.clientUserMessageId));
+      entry.nativeQueue=[...server,...messages.filter(row=>!clients.has(row.id))];entry.queueEpoch=(entry.queueEpoch||0)+1;this.emit('changed');
+    });
     client.on('threadState', ({ conversationId, change }) => {
       if (generation !== this.generation) return;
       const entry = this.entries.get(conversationId);
       if (!entry) return;
-      try { entry.store.apply(change); entry.ready = true; this.emit('changed'); }
+      try { entry.store.apply(change); entry.ready = true; this.recordSelectionReady(entry); this.emit('changed');this.maybeAutoTitle(entry,generation); }
       catch { this.repairEntry(entry, generation); }
     });
     client.on('disconnected', () => {
@@ -56,7 +66,7 @@ export class DesktopBridge extends EventEmitter {
       try { this.catalogRows = await this.historyReader.list(); this.catalogAt = Date.now(); } catch { /* Keep known chats available. */ }
     }
     const rows = new Map(this.catalogRows.map(row => [row.id, row]));
-    for (const entry of this.entries.values()) {if(entry.autoName&&rows.get(entry.id)?.name)entry.name=rows.get(entry.id).name;rows.set(entry.id, { ...rows.get(entry.id), id: entry.id, name: entry.name });}
+    for (const entry of this.entries.values()) {if(rows.get(entry.id)?.name)entry.name=rows.get(entry.id).name;rows.set(entry.id, { ...rows.get(entry.id), id: entry.id, name: entry.name });}
     return [...rows.values()];
   }
   async usage() {
@@ -68,6 +78,7 @@ export class DesktopBridge extends EventEmitter {
     const cwd=this.entries.get(baseThreadId)?.store.state?.cwd||this.historyReader?.threadDirectories?.get(baseThreadId);if(!cwd)throw Error('当前会话工作目录未就绪，请选择其他项目');
     const title=typeof name==='string'?name.trim().slice(0,80):'';
     const created=await this.chatCreator.create({cwd,name:title,model:this.entries.get(baseThreadId)?.store.state?.latestModel});
+    if(!title)await this.autoTitles?.remember(created.id,created.name).catch(()=>{});
     const row={id:created.id,name:created.name,groupId:base.groupId==='pinned'?'chats':base.groupId,groupName:base.groupId==='pinned'?'其他会话':base.groupName,groupOrder:base.groupOrder,updatedAt:Date.now()/1000};
     this.catalogRows.push(row);this.entries.set(created.id,{...row,autoName:!title,writable:true,history:[],store:new ThreadState(),ready:false,consumed:new Set()});this.client?.enableThreadControl(created.id);this.catalogAt=0;this.emit('changed');
     try{await this.chatCreator.show(created.id);}catch{/* Keep the created chat; never create a duplicate because opening the window failed. */}
@@ -80,13 +91,28 @@ export class DesktopBridge extends EventEmitter {
     return {...row,ready:false,writable:false,historyReady:true,historyUpdatedAt:row.updatedAt??0,
       turns:await this.backgroundHistoryReader.turns(threadId,{limit:10}),questions:[],approvals:[],activeTurnId:''};
   }
-  async openThread(id) {
+  recordSelectionReady(entry) {
+    const selection = this.desktopSelection;
+    if (selection?.id !== entry.id || selection.reported) return;
+    selection.reported = true;
+    this.emit('selectionTiming', {
+      at: new Date().toISOString(),
+      op: 'selection-ready',
+      elapsedMs: Date.now() - selection.startedAt,
+      ...(selection.launchAt ? {launchMs: selection.launchAt - selection.startedAt} : {}),
+      ...(selection.followAt ? {ownerMs: selection.followAt - selection.startedAt} : {}),
+    });
+  }
+
+  async openThread(id, {activate = false} = {}) {
+    const selection = activate ? (this.desktopSelection = {id, startedAt: Date.now()}) : null;
     if (this.entries.has(id)) {
-      const entry = this.entries.get(id); entry.historyReady = false;
+      const entry = this.entries.get(id);
+      if (entry.ready) { this.recordSelectionReady(entry); return; }
       this.entries.delete(id);this.entries.set(id,entry);
-      void this.hydrate(entry, this.generation); return;
+      void this.hydrate(entry, this.generation, selection); return;
     }
-    const row = (await this.catalog()).find(row => row.id === id);
+    const row = this.catalogRows.find(row => row.id === id) ?? (await this.catalog()).find(row => row.id === id);
     if (!row) {const error=Error('聊天已不存在于本机列表中');error.code='THREAD_NOT_FOUND';throw error;}
     if (this.entries.size >= 24) {
       const idle=[...this.entries.values()].find(entry=>!activeTurn(entry.store.state)&&!entry.loadingGeneration);
@@ -97,10 +123,14 @@ export class DesktopBridge extends EventEmitter {
     this.entries.set(id, entry);
     if (entry.writable) this.client?.enableThreadControl(id);
     this.emit('changed');
-    void this.hydrate(entry, this.generation);
+    void this.hydrate(entry, this.generation, selection);
   }
-  async hydrate(entry, generation) {
-    if (this.closed || entry.loadingGeneration === generation) return;
+  async hydrate(entry, generation, selection) {
+    if (this.closed) return;
+    if (entry.loadingGeneration === generation) {
+      if (selection) entry.pendingSelection = selection;
+      return;
+    }
     entry.loadingGeneration = generation;
     entry.repairPending = false;
     const persisted = async () => {
@@ -114,24 +144,84 @@ export class DesktopBridge extends EventEmitter {
     const live = async () => {
       try {
         const client = this.client;
-        const owner = await client.discoverOwner(entry.id);
+        const canActivate = () => selection && this.desktopSelection === selection &&
+          !this.closed && generation === this.generation && this.entries.get(entry.id) === entry &&
+          entry.writable && this.openDesktopChat;
+        let owner;
+        try {
+          owner = await client.discoverOwner(entry.id);
+        } catch (error) {
+          // A phone selection can arrive while background owner discovery is in flight.
+          if (entry.pendingSelection === this.desktopSelection) selection = entry.pendingSelection;
+          if (error.reason !== 'no-client-found' || !canActivate()) throw error;
+          if (entry.pendingSelection === selection) delete entry.pendingSelection;
+          selection.launchAt = Date.now();
+          await this.openDesktopChat(entry.id);
+          for (let attempt = 0; attempt < 16 && canActivate(); attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 250));
+            if (!canActivate()) return;
+            try {
+              owner = await client.discoverOwner(entry.id);
+              break;
+            } catch (retryError) {
+              if (retryError.reason !== 'no-client-found') throw retryError;
+            }
+          }
+          if (!owner) return;
+        }
         if (generation !== this.generation) return;
         entry.owner = owner;
         if(entry.resubscribe){client.unfollowThread?.(entry.id);entry.resubscribe=false;}
+        if (selection && this.desktopSelection === selection) selection.followAt = Date.now();
         await client.followThread(entry.id, owner);
-        if(entry.nativeQueue===undefined&&this.historyReader?.queuedMessages){const epoch=entry.queueEpoch||0;const queue=await this.historyReader.queuedMessages(entry.id);if(generation===this.generation&&(entry.queueEpoch||0)===epoch)entry.nativeQueue=queue;}
+        if (entry.nativeQueue === undefined) void this.refreshQueue(entry, generation);
         const [history]=await Promise.allSettled([
-          client.loadHistory(entry.id, owner),
+          (async () => {
+            if (selection) {
+              // Give the normal subscription a chance to deliver its snapshot first.
+              if (!entry.ready) await new Promise(resolve => setTimeout(resolve, 400));
+              if (this.closed || generation !== this.generation || this.entries.get(entry.id) !== entry) return false;
+              if (entry.ready) return false;
+            }
+            await client.loadHistory(entry.id, owner);
+            return true;
+          })(),
           client.readModelSettings ? client.readModelSettings(entry.id,owner).then(value=>{if(generation===this.generation)entry.modelSettings=value;}) : Promise.resolve(),
         ]);
-        if (generation === this.generation) { if(history.status==='fulfilled')entry.historyReady = true; this.emit('changed'); }
+        if (generation === this.generation) { if(history.status==='fulfilled' && history.value)entry.historyReady = true; this.emit('changed'); }
       } catch { /* Stored history remains viewable without a live desktop owner. */ }
     };
     try { await Promise.allSettled([persisted(), live()]); }
     finally {
       if(entry.loadingGeneration===generation)entry.loadingGeneration=null;
+      const pendingSelection = entry.pendingSelection;
+      if (pendingSelection && generation === this.generation) {
+        delete entry.pendingSelection;
+        if (!this.closed && this.desktopSelection === pendingSelection && !entry.ready) {
+          void this.hydrate(entry, generation, pendingSelection);
+        }
+      }
       if(entry.repairPending&&!this.closed&&generation===this.generation){entry.repairTimer=setTimeout(()=>void this.hydrate(entry,generation),250);entry.repairTimer.unref();}
     }
+  }
+  async refreshQueue(entry,generation){
+    if(!this.historyReader?.queuedMessages||entry.queueLoading)return;
+    entry.queueLoading=true;const epoch=entry.queueEpoch||0;
+    try{
+      const queue=await this.historyReader.queuedMessages(entry.id);
+      if(!this.closed&&generation===this.generation&&this.entries.get(entry.id)===entry&&(entry.queueEpoch||0)===epoch){entry.nativeQueue=queue;this.emit('changed');}
+    }catch{/* A temporary read failure must not erase the last observed queue. */}
+    finally{entry.queueLoading=false;}
+  }
+  maybeAutoTitle(entry,generation){
+    if(!entry.ready||!this.autoTitles?.wants(entry.id))return;
+    const turns=summarizeThread(entry.store.state).turns;
+    if(turns.at(-1)?.status!=='completed')return;
+    const prompt=turns.find(turn=>turn.input)?.input;if(!prompt)return;
+    void this.autoTitles.generate({threadId:entry.id,cwd:entry.store.state?.cwd,prompt,
+      canApply:()=>!this.closed&&generation===this.generation&&this.entries.get(entry.id)===entry}).then(title=>{
+      if(title&&!this.closed){entry.name=title;this.catalogAt=0;this.emit('changed');}
+    }).catch(()=>{});
   }
   repairEntry(entry,generation){
     entry.ready=false;entry.resubscribe=true;entry.repairPending=true;this.emit('changed');
@@ -162,7 +252,7 @@ export class DesktopBridge extends EventEmitter {
       }
       return { id: entry.id, name: entry.name || '桌面聊天', ready: entry.ready,
         queueSupported:!!this.historyReader?.queuedMessages,
-        queuedMessages:(entry.nativeQueue||[]).slice(0,100).map(message=>({id:message.id,text:String(message.prompt||message.context?.prompt||'').slice(0,16000),status:message.submission?.status||'queued'})),
+        queuedMessages:(entry.nativeQueue||[]).slice(0,100).map(message=>({id:message.id,text:String(message.prompt||message.text||message.context?.prompt||[...message.context?.fileAttachments||[],...message.context?.imageAttachments||[]].map(row=>row.label||row.filename||'附件').join('、')).slice(0,16000),status:message.submission?.status||'queued'})),
         model: state?.latestThreadSettings?.model || state?.latestModel || entry.modelSettings?.model || '', reasoningEffort:state?.latestReasoningEffort || state?.latestThreadSettings?.effort || entry.modelSettings?.reasoningEffort || '',
         serviceTier:state?.latestThreadSettings?.serviceTier??'default',
         activity: entry.ready ? summary.activity : undefined,
@@ -175,6 +265,7 @@ export class DesktopBridge extends EventEmitter {
         revision: entry.store.revision, runtimeStatus: summary.runtimeStatus || 'unavailable',
         turns: [...turns.values()].slice(-50),
         questions: entry.ready ? pendingQuestions(state).map(q => ({ ...q, submitting: entry.consumed.has(JSON.stringify(['question', q.turnId, q.id])) })) : [],
+        attentionRequests: entry.ready ? pendingAttention(state) : [],
         approvals: (liveTurn ? state?.requests || [] : []).flatMap(request => {
           const type = String(request.type || request.method || '');
           const kind = /command/i.test(type) ? 'command' : /file/i.test(type) ? 'file' : null;
@@ -203,7 +294,21 @@ export class DesktopBridge extends EventEmitter {
     if (!entry.writable) throw new Error('此聊天仅允许读取，请在电脑授权后操作');
     const state = entry.store.state;
     const active = activeTurn(state);
-    if (command.op === 'model') {
+    if(['start','steer','queue'].includes(command.op)){
+      command={...command,skills:[]};
+      const slash=/^\/([\w.-]+)(?=\s|$)/.exec(command.text);
+      if(slash){
+        const skills=await this.historyReader?.skills?.(state.cwd);
+        const matches=(skills||[]).filter(row=>row.name===slash[1]);
+        if(matches.length!==1)throw Error('此斜杠命令或技能不可用，请从手机命令列表选择');
+        if(command.op==='queue')throw Error('技能消息请在空闲时发送，或切换为立即插话');
+        command={...command,text:'$'+slash[1]+command.text.slice(slash[0].length),skills:[matches[0]]};
+      }
+    }
+    if(command.op==='compact'){
+      if(active)throw Error('请在当前任务结束后压缩上下文');
+      await this.client.compactThread(threadId,entry.owner);
+    } else if (command.op === 'model') {
       const {models}=await this.modelOptions(threadId);
       const model=models.find(row=>row.model===command.model);
       if(!model || !model.efforts.includes(command.effort))throw Error('模型或思考强度不在电脑可用列表中，请刷新后选择');
@@ -219,21 +324,23 @@ export class DesktopBridge extends EventEmitter {
       this.emit('changed');
     } else if(command.op==='queue'){
       if(!this.historyReader?.queuedMessages)throw Error('桌面排队状态暂不可读，请更新电脑插件');
-      const epoch=entry.queueEpoch||0,stored=await this.historyReader.queuedMessages(threadId);if((entry.queueEpoch||0)===epoch)entry.nativeQueue=stored;
+      const epoch=entry.queueEpoch||0,stored=await (this.historyReader.localQueuedMessages?.(threadId)??this.historyReader.queuedMessages(threadId));
+      if(!this.historyReader.localQueuedMessages&&(entry.queueEpoch||0)===epoch)entry.nativeQueue=stored;
       if((entry.nativeQueue||[]).length>=100)throw Error('此会话已有 100 条排队消息');
-      const id=randomUUID(),message={id,prompt:command.text,createdAt:Date.now(),cwd:state.cwd,submissionIntent:'queue',
-        context:{prompt:command.text,addedFiles:[],fileAttachments:[],imageAttachments:[],commentAttachments:[],ideContext:null,messageThreadId:randomUUID()},
+      const id=randomUUID(),message={id,text:command.text,prompt:command.text,createdAt:Date.now(),cwd:state.cwd,submissionIntent:'queue',
+        context:messageInput(command.text,{attachments:command.attachments,cwd:state.cwd,id}).context,
         submission:{hostId:'local',status:'queued',queueModeOverride:'queue'}};
-      await this.client.setQueuedFollowUps(threadId,[...(entry.nativeQueue||[]),message],{ownerId:entry.owner});this.emit('changed');return {accepted:true,queued:true,messageId:id};
+      const existing = stored.map(row => typeof row.text !== 'string' && typeof row.prompt === 'string' ? {...row, text: row.prompt} : row);
+      await this.client.setQueuedFollowUps(threadId,[...existing,message],{ownerId:entry.owner});this.emit('changed');return {accepted:true,queued:true,messageId:id};
     } else if(command.op==='queue-remove'){
       if(!(entry.nativeQueue||[]).some(row=>row.id===command.messageId))throw Error('排队消息已变化，请刷新');
-      await this.client.removeQueuedMessage(threadId,command.messageId,entry.owner);this.emit('changed');
+      await this.client.removeQueuedMessage(threadId,command.messageId,entry.owner);entry.nativeQueue=(entry.nativeQueue||[]).filter(row=>row.id!==command.messageId);this.emit('changed');
     } else if (command.op === 'start') {
       if (active) throw new Error('聊天正在执行，请等待完成或使用追加指令');
-      await this.client.startTurn(threadId, command.text, { ownerId: entry.owner });
+      await this.client.startTurn(threadId, command.text, { ownerId: entry.owner,cwd:state.cwd,attachments:command.attachments,skills:command.skills });
     } else if (command.op === 'steer') {
       if (!active) throw new Error('没有正在执行的任务');
-      await this.client.steerTurn(threadId, command.text, { ownerId: entry.owner, cwd: state.cwd });
+      await this.client.steerTurn(threadId, command.text, { ownerId: entry.owner, cwd: state.cwd,attachments:command.attachments,skills:command.skills });
     } else if (command.op === 'interrupt') {
       if (!active || command.turnId !== active.turnId) throw new Error('任务已变化，请刷新后重试');
       await this.client.interruptTurn(threadId, active.turnId, entry.owner);
@@ -269,6 +376,13 @@ export class DesktopBridge extends EventEmitter {
     } else throw new Error('不支持的操作');
     return { accepted: true };
   }
+  async skills(threadId){
+    const entry=this.entries.get(threadId);if(!entry?.ready||!entry.writable)throw Error('聊天未授权写入或尚未就绪');
+    if(!this.historyReader?.skills)throw Error('请更新电脑插件以读取技能');
+    const rows=await this.historyReader.skills(entry.store.state.cwd),counts=new Map();
+    for(const row of rows)counts.set(row.name,(counts.get(row.name)||0)+1);
+    return {skills:rows.filter(row=>counts.get(row.name)===1&&/^[\w.-]+$/.test(row.name)).map(row=>({name:row.name,description:String(row.shortDescription||row.description||'').slice(0,240)}))};
+  }
   async modelOptions(threadId){
     const entry=this.entries.get(threadId);
     if(!entry?.ready)throw Error('桌面聊天尚未就绪');
@@ -279,5 +393,5 @@ export class DesktopBridge extends EventEmitter {
     entry.modelSettings=await this.client.readModelSettings(threadId,entry.owner);
     return {models:this.modelCatalog,current:{model:entry.modelSettings?.model||'',effort:entry.modelSettings?.reasoningEffort||'',serviceTier:entry.store.state?.latestThreadSettings?.serviceTier??'default'}};
   }
-  close() { this.closed = true; ++this.generation; clearTimeout(this.reconnectTimer); clearInterval(this.refreshTimer);for(const entry of this.entries.values())clearTimeout(entry.repairTimer);this.client?.close(); this.historyReader?.close();if(this.backgroundHistoryReader!==this.historyReader)this.backgroundHistoryReader?.close(); }
+  close() { this.closed = true; ++this.generation; clearTimeout(this.reconnectTimer); clearInterval(this.refreshTimer);for(const entry of this.entries.values())clearTimeout(entry.repairTimer);this.client?.close(); this.historyReader?.close();this.autoTitles?.close();if(this.backgroundHistoryReader!==this.historyReader)this.backgroundHistoryReader?.close(); }
 }

@@ -38,10 +38,12 @@ public class MobileStateTest {
         JSONObject replacement=echoThread("old","first");replacement.getJSONArray("turns").getJSONObject(0).getJSONArray("timeline").getJSONObject(1).put("id","server-replacement");
         assertEquals(1,sent.project(replacement).getJSONArray("confirmedMessages").length());assertEquals(0,sent.project(echoThread("old","first","second")).getJSONArray("confirmedMessages").length());
     }
-    @Test public void canonicalArrivingBeforeAckDoesNotShowADuplicateAndQueuesAreMarkedPending()throws Exception{
+    @Test public void canonicalArrivingBeforeAckDoesNotShowADuplicate()throws Exception{
         SentMessages sent=new SentMessages();sent.accepted("chat","one","same",SentMessages.users(echoThread("old")).keySet());assertEquals(0,sent.project(echoThread("old","new")).getJSONArray("confirmedMessages").length());
-        JSONObject thread=new JSONObject().put("id","queued-chat").put("queuedMessages",new JSONArray().put(new JSONObject().put("id","q").put("text","next").put("status","queued")));
-        java.util.List<ChatRows.Row> rows=ChatRows.build(thread);assertEquals(1,rows.size());assertEquals("user",rows.get(0).type);assertTrue(rows.get(0).data.getString("delivery").contains("已排队"));
+    }
+    @Test public void queueEntriesStayOutOfTranscriptWithoutHidingSentMessages()throws Exception{
+        JSONObject thread=echoThread("sent").put("queuedMessages",new JSONArray().put(new JSONObject().put("id","q").put("text","next").put("status","queued")));
+        java.util.List<ChatRows.Row> rows=ChatRows.build(thread);assertEquals(1,rows.size());assertEquals("user",rows.get(0).type);assertEquals("same",rows.get(0).data.getString("text"));assertEquals(1,thread.getJSONArray("queuedMessages").length());
     }
     @Test public void visibleSendModeControlsQueueOrSteerWithoutChangingIdleAndStop()throws Exception{
         JSONObject current=state("inProgress","",true).put("online",true),thread=current.getJSONArray("threads").getJSONObject(0);thread.put("queueSupported",true);
@@ -544,5 +546,39 @@ public class MobileStateTest {
         assertEquals(1, MobileState.alerts(before, after).length());
         after.getJSONArray("threads").getJSONObject(0).getJSONArray("turns").getJSONObject(0).put("startedAtMs", 500);
         assertEquals(0, MobileState.alerts(before, after).length());
+    }
+    @Test public void pendingQuestionsNotifyForNativeAndAsyncRequests()throws Exception{
+        JSONObject current=state("inProgress","",true);JSONArray requests=new JSONArray();
+        requests.put(new JSONObject().put("id",7).put("kind","native").put("turnId","turn").put("questions",new JSONArray().put(new JSONObject().put("id","q").put("title","Choose?"))));
+        requests.put(new JSONObject().put("id","message").put("kind","async").put("turnId","turn").put("questions",new JSONArray().put(new JSONObject().put("id","q2").put("title","Continue?"))));
+        current.getJSONArray("threads").getJSONObject(0).put("questions",requests);
+        JSONArray alerts=MobileState.alerts(null,current);assertEquals(2,alerts.length());assertEquals("question",alerts.getJSONObject(0).getString("kind"));assertEquals(7,alerts.getJSONObject(0).getJSONObject("request").getInt("id"));assertEquals("async",alerts.getJSONObject(1).getJSONObject("request").getString("kind"));
+    }
+    @Test public void questionsDoNotNotifyOfflineWhileSubmittingOrAfterResolution()throws Exception{
+        JSONObject current=state("inProgress","",true);JSONObject request=new JSONObject().put("id",7).put("questions",new JSONArray().put(new JSONObject().put("title","Choose?")));
+        current.getJSONArray("threads").getJSONObject(0).put("questions",new JSONArray().put(request));
+        assertEquals(1,MobileState.alerts(null,current).length());assertEquals(0,MobileState.alerts(null,MobileState.offline(current)).length());
+        request.put("submitting",true);assertEquals(0,MobileState.alerts(null,current).length());request.put("submitting",false).put("questions",new JSONArray());assertEquals(0,MobileState.alerts(null,current).length());
+        current.getJSONArray("threads").getJSONObject(0).put("questions",new JSONArray());assertEquals(0,MobileState.alerts(null,current).length());
+    }
+    @Test public void computerOnlyPermissionAttentionIsVisibleAndClearedOffline()throws Exception{
+        JSONObject current=state("inProgress","",true);JSONObject thread=current.getJSONArray("threads").getJSONObject(0);
+        thread.put("attentionRequests",new JSONArray().put(new JSONObject().put("id",31).put("kind","item/permissions/requestApproval").put("title","Codex 需要电脑权限授权")));
+        assertEquals("attention",MobileState.alerts(null,current).getJSONObject(0).getString("kind"));
+        boolean visible=false;for(ChatRows.Row row:ChatRows.build(thread))if("attention".equals(row.type))visible=true;assertTrue(visible);
+        JSONObject offline=MobileState.offline(current);assertEquals(0,MobileState.alerts(null,offline).length());assertEquals(0,offline.getJSONArray("threads").getJSONObject(0).getJSONArray("attentionRequests").length());assertEquals(1,thread.getJSONArray("attentionRequests").length());
+    }
+    @Test public void slashSuggestionsDoNotConsumeArgumentsOrFilesystemPaths(){
+        assertTrue(SlashCommands.suggesting("/"));assertTrue(SlashCommands.matches("/mo","model"));assertFalse(SlashCommands.suggesting("/pr instructions"));assertFalse(SlashCommands.suggesting("/etc/config"));assertFalse(SlashCommands.suggesting("normal"));assertEquals("model",SlashCommands.builtin(" /model "));assertEquals("",SlashCommands.builtin("/model gpt"));assertEquals("",SlashCommands.builtin("/unknown"));assertEquals("",SlashCommands.builtin("/pr"));
+    }
+    @Test public void easyTierNoTunConfigurationAddsOnlyTheAppLoopbackProxy()throws Exception{
+        EasyTierProfile profile=new EasyTierProfile("fixture","secret","10.77.0.2/24","tcp://127.0.0.1:1");String normal=profile.toml(),proxy=profile.toml(23456);
+        assertFalse(normal.contains("socks5_proxy"));assertFalse(normal.contains("no_tun"));assertTrue(proxy.contains("socks5_proxy = \"socks5://127.0.0.1:23456\""));assertTrue(proxy.indexOf("socks5_proxy")<proxy.indexOf("[network_identity]"));assertTrue(proxy.contains("no_tun = true"));assertTrue(proxy.contains("use_smoltcp = true"));assertTrue(proxy.contains("enable_encryption = true"));
+        try{profile.toml(80);fail("invalid proxy port");}catch(IllegalArgumentException expected){}
+    }
+    @Test public void easyTierProxyRoutesOnlyTheVirtualSubnetAndCanBeCleared()throws Exception{
+        EasyTierProfile profile=new EasyTierProfile("fixture","","10.77.0.2/24","tcp://127.0.0.1:1");
+        try{EasyTierProxy.configure(profile,23456);assertEquals(java.net.Proxy.Type.SOCKS,EasyTierProxy.forHost("10.77.0.1").type());assertEquals("127.0.0.1",((java.net.InetSocketAddress)EasyTierProxy.forHost("10.77.0.1").address()).getHostString());assertSame(java.net.Proxy.NO_PROXY,EasyTierProxy.forHost("10.77.1.1"));assertSame(java.net.Proxy.NO_PROXY,EasyTierProxy.forHost("10.77.0.1.example.invalid"));assertSame(java.net.Proxy.NO_PROXY,EasyTierProxy.forHost("127.0.0.1"));try{EasyTierProxy.configure(profile,80);fail("invalid port");}catch(IllegalArgumentException expected){}}
+        finally{EasyTierProxy.clear();}assertSame(java.net.Proxy.NO_PROXY,EasyTierProxy.forHost("10.77.0.1"));
     }
 }

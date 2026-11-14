@@ -77,7 +77,7 @@ test('discovers actual owner, reads settings, and accepts only matching owner/ta
     if (request.method === 'thread-follower-read-model-settings') respond(request, send, { settings: { model: 'test-model' } });
     if (request.method === 'thread-stream-following-changed' && request.params.following) {
       const message = { type: 'broadcast', method: 'thread-stream-state-changed', sourceClientId: 'desktop-owner',
-        targetClientIds: ['probe-client'], version: 11,
+        targetClientIds: ['probe-client'], version: 13,
         params: { hostId: 'local', conversationId: 'test-thread', change: { type: 'snapshot', revision: 1, conversationState: { id: 'test-thread' } } } };
       send({ ...message, sourceClientId: 'wrong-owner' });
       send({ ...message, targetClientIds: ['wrong-client'] });
@@ -144,6 +144,21 @@ test('model changes use the installed settings protocol and forward only model a
   const sent=messages.find(message=>message.method==='thread-follower-update-thread-settings');
   assert.equal(sent.version,2);assert.deepEqual(sent.params.threadSettings,{model:'available-model',effort:'high'});assert.equal(sent.targetClientId,'desktop-owner');
 });
+
+test('compact uses the verified follower protocol rather than resuming the thread',async t=>{
+  const {client,messages}=await fixture(t,(request,send)=>{if(request.method==='thread-follower-compact-thread')respond(request,send,{});},{controlThreadIds:['allowed-thread']});
+  await client.compactThread('allowed-thread','desktop-owner');const sent=messages.find(row=>row.method==='thread-follower-compact-thread');assert.equal(sent.version,1);assert.deepEqual(sent.params,{conversationId:'allowed-thread'});assert.equal(sent.targetClientId,'desktop-owner');await assert.rejects(client.compactThread('other-thread','desktop-owner'),/not enabled/);
+});
+
+test('start and steer forward native attachment metadata alongside localImage input',async t=>{
+  const {client,messages}=await fixture(t,(request,send)=>{if(['thread-follower-start-turn','thread-follower-steer-turn'].includes(request.method))respond(request,send,{});},{controlThreadIds:['allowed-thread']});
+  const attachments=[{id:'image',kind:'image',name:'image.png',path:'C:\\attachments\\image.png'},{id:'file',kind:'text',name:'notes.md',path:'C:\\attachments\\notes.md'}];
+  await client.startTurn('allowed-thread','',{ownerId:'desktop-owner',attachments,cwd:'C:\\project'});
+  await client.steerTurn('allowed-thread','read',{ownerId:'desktop-owner',attachments,cwd:'C:\\project'});
+  const start=messages.find(row=>row.method==='thread-follower-start-turn').params.turnStart;
+  assert.equal(start.context.attachments.length,2);assert.equal(start.context.localTurnMetadata.fileAttachmentCount,1);assert.equal(start.request.input[1].type,'localImage');
+  const steer=messages.find(row=>row.method==='thread-follower-steer-turn').params;assert.equal(steer.attachments.length,2);assert.equal(steer.restoreMessage.context.fileAttachments[0].fsPath,attachments[1].path);
+});
 test('speed selection forwards only the supported service tier and rejects arbitrary settings',async t=>{
   const {client,messages}=await fixture(t,(request,send)=>{if(request.method==='thread-follower-update-thread-settings')respond(request,send,{applied:true});},{controlThreadIds:['allowed-thread']});
   await client.updateModelSettings('allowed-thread','available-model','ultra',{ownerId:'desktop-owner',serviceTier:'priority',permissions:'unsafe'});
@@ -171,4 +186,20 @@ test('user input uses the installed v1 response envelope and an explicitly autho
   assert.equal(sent.version,1);assert.equal(sent.targetClientId,'desktop-owner');
   assert.deepEqual(sent.params,{conversationId:'allowed-thread',requestId:7,response:{answers}});
   await assert.rejects(client.replyUserInput('other-thread',7,answers,'desktop-owner'),/not enabled/);
+});
+
+test('current desktop accepts the queue write and keeps renderable text', async t => {
+  const method = 'thread-follower-set-queued-follow-ups-state';
+  const {client, messages} = await fixture(t, (request, send) => {
+    if (request.method !== method) return;
+    if (request.version !== 3) {
+      send({type:'response', requestId:request.requestId, resultType:'error', error:'version-mismatch'});
+      return;
+    }
+    respond(request, send, {ok:true});
+  }, {controlThreadIds:['allowed-thread']});
+  const entry = {id:'queued',text:'手机消息',prompt:'手机消息',context:{prompt:'手机消息'}};
+  await client.setQueuedFollowUps('allowed-thread', [entry], {ownerId:'desktop-owner'});
+  const submitted = messages.find(row => row.method === method).params.state['allowed-thread'][0];
+  assert.equal(submitted.text.replaceAll('手机', '桌面'), '桌面消息');
 });

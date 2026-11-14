@@ -57,7 +57,7 @@ final class ChatRows {
         final String key, type, signature;
         final JSONObject data;
         Row(String key, String type, JSONObject data) {
-            this.key=key; this.type=type; this.data=data; signature=type+":"+data.toString();
+            this.key=key; this.type=type; this.data=data; signature=type+":"+MemoryJson.fingerprint(data);
         }
     }
     static List<Row> build(JSONObject thread) throws Exception {
@@ -86,12 +86,13 @@ final class ChatRows {
             }
         }
         JSONArray confirmed=thread.optJSONArray("confirmedMessages");if(confirmed!=null)for(int i=0;i<confirmed.length();i++){JSONObject item=confirmed.getJSONObject(i);rows.removeIf(row->row.type.equals("welcome"));rows.add(new Row(chat+":sent:"+item.optString("id"),"user",item));}
-        JSONArray queued=thread.optJSONArray("queuedMessages");if(queued!=null)for(int i=0;i<queued.length();i++){JSONObject item=queued.getJSONObject(i);rows.removeIf(row->row.type.equals("welcome"));rows.add(new Row(chat+":queued:"+item.optString("id"),"user",new JSONObject().put("text",item.optString("text")).put("delivery",item.optString("status").equals("outcome-unknown")?"发送状态待确认":"已排队 · 等待执行")));}
         JSONObject activity=thread.optJSONObject("activity");
         if(thread.optBoolean("ready")&&!thread.optString("activeTurnId").isEmpty())rows.add(new Row(chat+":activity","activity",activity==null?new JSONObject().put("label","正在思考…"):activity));
         JSONArray approvals=thread.optJSONArray("approvals");
         JSONArray questions=thread.optJSONArray("questions");
         if(thread.optBoolean("ready")&&!MobileState.activeTurnId(thread).isEmpty()&&questions!=null)for(int i=0;i<questions.length();i++)rows.add(new Row(chat+":question:"+questions.getJSONObject(i).optString("id"),"question",questions.getJSONObject(i)));
+        JSONArray attention=thread.optJSONArray("attentionRequests");
+        if(thread.optBoolean("ready")&&attention!=null)for(int i=0;i<attention.length();i++)rows.add(new Row(chat+":attention:"+attention.getJSONObject(i).optString("id"),"attention",attention.getJSONObject(i)));
         if(approvals!=null)for(int i=0;i<approvals.length();i++)rows.add(new Row(chat+":approval:"+approvals.getJSONObject(i).optString("id",String.valueOf(i)),"approval",approvals.getJSONObject(i)));
         return rows;
     }

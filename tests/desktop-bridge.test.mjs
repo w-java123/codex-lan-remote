@@ -19,6 +19,26 @@ class Client extends EventEmitter {
 }
 const stored = [{ id: 'saved-turn', status: 'completed', input: 'old question', agentMessages: ['old answer'], toolResults: [] }];
 
+test('slash skills resolve only installed names and compact stays owner-bound, writable and idle',async t=>{
+  const {bridge,client}=fixture([{id:'active'}]);t.after(()=>bridge.close());await bridge.connect();let sent,compact;
+  bridge.historyReader.skills=async()=>[{name:'pr',path:'C:\\skills\\pr\\SKILL.md',description:'Write PRs',enabled:true}];
+  client.startTurn=async(...args)=>{sent=args;};client.compactThread=async(...args)=>{compact=args;};
+  assert.deepEqual(await bridge.skills('active'),{skills:[{name:'pr',description:'Write PRs'}]});
+  await bridge.command('active',{op:'start',text:'/pr summarize',skills:[{name:'bad',path:'secret'}]});assert.equal(sent[1],'$pr summarize');assert.equal(sent[2].skills[0].path,'C:\\skills\\pr\\SKILL.md');
+  await assert.rejects(bridge.command('active',{op:'start',text:'/unknown'}),/不可用/);
+  await assert.rejects(bridge.command('active',{op:'queue',text:'/pr test'}),/空闲/);
+  await bridge.command('active',{op:'compact'});assert.deepEqual(compact,['active','owner']);
+  bridge.entries.get('active').writable=false;await assert.rejects(bridge.command('active',{op:'compact'}),/读取/);await assert.rejects(bridge.skills('active'),/授权/);
+  bridge.entries.get('active').writable=true;client.emit('threadState',{conversationId:'active',change:{type:'snapshot',revision:2,conversationState:{turns:[{turnId:'busy',status:'inProgress',items:[]}]}}});await assert.rejects(bridge.command('active',{op:'compact'}),/任务结束/);
+});
+
+test('queued phone files persist native attachment context without duplicating file bytes',async t=>{
+  const {bridge,client}=fixture([{id:'active'}]);t.after(()=>bridge.close());let queue=[];
+  bridge.historyReader.queuedMessages=async()=>queue;client.setQueuedFollowUps=async(id,messages)=>{queue=messages;client.emit('queuedMessages',{conversationId:id,messages});};await bridge.connect();
+  await bridge.command('active',{op:'queue',text:'',attachments:[{id:'file',name:'proof.txt',kind:'text',path:'C:\\attachments\\proof.txt'},{id:'image',name:'proof.png',kind:'image',path:'C:\\attachments\\proof.png'}]});
+  assert.equal(queue[0].context.fileAttachments[0].fsPath,'C:\\attachments\\proof.txt');assert.equal(queue[0].context.imageAttachments[0].localPath,'C:\\attachments\\proof.png');assert.equal(queue[0].prompt,'');assert.ok(JSON.stringify(queue).length<2048);assert.match(bridge.snapshot()[0].queuedMessages[0].text,/proof.txt.*proof.png/);
+});
+
 test('an old inProgress flag cannot keep a finished chat busy or expose stale approvals and questions',async t=>{
   const {bridge,client}=fixture([{id:'active'}]);t.after(()=>bridge.close());await bridge.connect();
   const state={turns:[{turnId:'old',status:'inProgress',items:[{type:'agentMessage',id:'q',questions:[{title:'Old?'}]}]},{turnId:'latest',status:'completed',items:[]}],requests:[{id:3,method:'item/commandExecution/requestApproval',params:{turnId:'old'}},{id:4,method:'tool/requestUserInput',params:{turnId:'old',questions:[]}}]};
@@ -29,13 +49,13 @@ test('an old inProgress flag cannot keep a finished chat busy or expose stale ap
 });
 
 test('native FIFO preserves desktop queued messages and removal targets the live owner',async t=>{
-  const {bridge,client}=fixture([{id:'active'}]);t.after(()=>bridge.close());let queue=[{id:'desktop',prompt:'first',submission:{status:'queued'}}],removed;
+  const {bridge,client}=fixture([{id:'active'}]);t.after(()=>bridge.close());const desktop={id:'desktop',text:'first',submission:{status:'queued'}}; const legacy={id:'legacy',prompt:'legacy',pausedReason:'interrupted',submission:{status:'queued'}}; let queue=[desktop,legacy],removed;
   bridge.historyReader.queuedMessages=async()=>structuredClone(queue);
   client.setQueuedFollowUps=async(id,messages,options)=>{assert.equal(id,'active');assert.equal(options.ownerId,'owner');queue=messages;client.emit('queuedMessages',{conversationId:id,messages});};
   client.removeQueuedMessage=async(...args)=>{removed=args;};await bridge.connect();
   await Promise.all([bridge.command('active',{op:'queue',text:'second'}),bridge.command('active',{op:'queue',text:'third'})]);
-  assert.deepEqual(queue.map(row=>row.prompt),['first','second','third']);assert.equal(queue[1].submissionIntent,'queue');
-  assert.deepEqual(bridge.snapshot()[0].queuedMessages.map(row=>row.text),['first','second','third']);
+  assert.deepEqual(queue.map(row=>row.text.replaceAll(' ', ' ')),['first','legacy','second','third']); assert.deepEqual(queue[0],desktop); assert.deepEqual(queue[1],{...legacy,text:'legacy'}); assert.equal(queue[2].submissionIntent,'queue');
+  assert.deepEqual(bridge.snapshot()[0].queuedMessages.map(row=>row.text),['first','legacy','second','third']);
   await bridge.command('active',{op:'queue-remove',messageId:'desktop'});assert.deepEqual(removed,['active','desktop','owner']);await assert.rejects(bridge.command('active',{op:'queue-remove',messageId:'unknown'}),/变化/);
 });
 
@@ -165,4 +185,58 @@ test('current turn comes from the live owner, never an unfinished history snapsh
   assert.equal(bridge.snapshot()[0].activeTurnId, 'actual-turn');
   client.emit('disconnected');
   assert.equal(bridge.snapshot()[0].activeTurnId, '');
+});
+
+test('permission and tool elicitation requests are visible as read-only attention without exposing raw payloads',async t=>{
+  const {bridge,client}=fixture([{id:'active'}]);t.after(()=>bridge.close());await bridge.connect();
+  const requests=[{id:31,method:'item/permissions/requestApproval',params:{turnId:'turn',reason:'Allow browser?',permissions:{credentials:'PRIVATE'}}},{id:32,method:'mcpServer/elicitation/request',params:{turnId:'turn',message:'Confirm tool setup',url:'https://example.invalid/?token=PRIVATE'}},{id:33,method:'item/tool/requestOptionPicker',params:{turnId:'turn'}},{id:34,method:'item/permissions/requestApproval',params:{turnId:'old'}}];
+  client.emit('threadState',{conversationId:'active',change:{type:'snapshot',revision:2,conversationState:{turns:[{turnId:'turn',status:'inProgress',items:[]}],requests}}});
+  const row=bridge.snapshot()[0];assert.deepEqual(row.attentionRequests?.map(r=>r.id),[31,32,33]);assert.equal(row.approvals.length,0);assert.ok(!JSON.stringify(row.attentionRequests).includes('PRIVATE'));
+  await assert.rejects(bridge.command('active',{op:'approve',turnId:'turn',requestId:31,decision:'accept'}));
+  requests[0].completed=true;client.emit('threadState',{conversationId:'active',change:{type:'snapshot',revision:3,conversationState:{turns:[{turnId:'turn',status:'inProgress',items:[]}],requests}}});assert.deepEqual(bridge.snapshot()[0].attentionRequests.map(r=>r.id),[32,33]);
+  client.emit('disconnected');assert.deepEqual(bridge.snapshot()[0].attentionRequests,[]);
+});
+
+test('refreshing queues preserves a newer owner broadcast and supports native text entries',async t=>{
+  const {bridge,client}=fixture([{id:'active'}]);t.after(()=>bridge.close());bridge.historyReader.queuedMessages=async()=>[];await bridge.connect();let release;
+  bridge.historyReader.queuedMessages=()=>new Promise(resolve=>{release=resolve;});const refresh=bridge.refreshQueue(bridge.entries.get('active'),bridge.generation);await Promise.resolve();
+  client.emit('queuedMessages',{conversationId:'active',messages:[{id:'newer',text:'native server message'}]});release([{id:'stale',prompt:'outdated'}]);await refresh;assert.deepEqual(bridge.snapshot()[0].queuedMessages.map(r=>r.text),['native server message']);
+});
+test('adding a mobile draft never copies server queue entries into the local queue setter',async t=>{
+  const {bridge,client}=fixture([{id:'active'}]);t.after(()=>bridge.close());bridge.historyReader.queuedMessages=async()=>[{id:'server',text:'server message'},{id:'local',prompt:'local message'}];bridge.historyReader.localQueuedMessages=async()=>[{id:'local',prompt:'local message'}];let written;client.setQueuedFollowUps=async(id,messages)=>{written=messages;};await bridge.connect();await bridge.command('active',{op:'queue',text:'mobile'});assert.deepEqual(written.map(r=>r.prompt),['local message','mobile']);assert.ok(!written.some(r=>r.id==='server'));
+});
+
+test('legacy owner broadcasts do not erase cached server queue entries',async t=>{
+  const {bridge,client}=fixture([{id:'active'}]);t.after(()=>bridge.close());bridge.historyReader.queuedMessages=async()=>[{id:'server',clientUserMessageId:'echo',serverQueue:true,prompt:'server message'}];await bridge.connect();client.emit('queuedMessages',{conversationId:'active',messages:[{id:'echo',prompt:'duplicate'},{id:'local',prompt:'new local'}]});assert.deepEqual(bridge.snapshot()[0].queuedMessages.map(r=>r.id),['server','local']);
+});
+
+test('catalog refresh reflects desktop renames for previously opened chats',async t=>{
+  const {bridge}=fixture([{id:'active',name:'stale'}]);t.after(()=>bridge.close());await bridge.connect();bridge.historyReader.list=async()=>[{id:'active',name:'desktop renamed'}];bridge.catalogAt=0;assert.equal((await bridge.catalog()).find(row=>row.id==='active').name,'desktop renamed');assert.equal(bridge.snapshot()[0].name,'desktop renamed');
+});
+test('automatic naming waits for completion and is limited to tracked phone-created chats',async t=>{
+  const named=[];const autoTitles={wants:id=>id==='active',generate:async options=>{named.push(options);return 'generated';},close(){}};const {bridge,client}=fixture([{id:'active'}],{autoTitles});t.after(()=>bridge.close());await bridge.connect();
+  const state={cwd:'project',turns:[{turnId:'t',status:'inProgress',items:[{type:'userMessage',id:'u',content:[{type:'text',text:'first request'}]}]}],requests:[]};client.emit('threadState',{conversationId:'active',change:{type:'snapshot',revision:2,conversationState:state}});assert.equal(named.length,0);state.turns[0].status='completed';client.emit('threadState',{conversationId:'active',change:{type:'snapshot',revision:3,conversationState:state}});await Promise.resolve();assert.equal(named.length,1);assert.equal(named[0].prompt,'first request');assert.equal(bridge.snapshot()[0].name,'generated');
+});
+test('explicit authorized selection opens an unloaded chat and waits for live state', async t => {
+  const opened = [];
+  const {bridge,client} = fixture([], {allowSelectedChats:true, openDesktopChat:async id => opened.push(id)});
+  t.after(() => bridge.close());
+  client.discoverOwner = async () => {
+    if (!opened.length) throw Object.assign(Error('missing owner'), {reason:'no-client-found'});
+    return 'owner';
+  };
+  await bridge.connect();
+  await bridge.openThread('other');
+  assert.deepEqual(opened, []);
+  await bridge.openThread('other', {activate:true});
+  assert.equal(bridge.snapshot()[0].ready, false);
+  await new Promise((resolve,reject) => {
+    const timer = setTimeout(() => reject(Error('live snapshot missing')), 2500);
+    bridge.on('changed', () => {
+      if (bridge.snapshot()[0].ready) {clearTimeout(timer);resolve();}
+    });
+  });
+  assert.deepEqual(opened, ['other']);
+  assert.deepEqual(client.historyRequests, []);
+  assert.equal(bridge.snapshot()[0].writable, true);
 });
