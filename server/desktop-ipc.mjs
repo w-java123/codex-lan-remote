@@ -4,6 +4,7 @@
 import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import { messageInput } from './message-input.mjs';
 
 export const DEFAULT_PIPE = '\\\\.\\pipe\\codex-ipc';
 export const PROTOCOL_VERSIONS = Object.freeze({
@@ -12,15 +13,16 @@ export const PROTOCOL_VERSIONS = Object.freeze({
   'thread-follower-read-model-settings': 1,
   'thread-follower-update-thread-settings': 2,
   'thread-stream-following-changed': 1,
-  'thread-stream-state-changed': 11,
+  'thread-stream-state-changed': 13,
   'thread-follower-start-turn': 2,
   'thread-follower-load-complete-history': 1,
   'thread-follower-steer-turn': 1,
+  'thread-follower-compact-thread': 1,
   'thread-follower-interrupt-turn': 4,
-  'thread-follower-set-queued-follow-ups-state': 1,
+  'thread-follower-set-queued-follow-ups-state': 3,
   'thread-follower-remove-queued-message': 1,
   'thread-follower-clear-queued-messages': 1,
-  'thread-queued-followups-changed': 2,
+  'thread-queued-followups-changed': 3,
   'thread-follower-command-approval-decision': 1,
   'thread-follower-file-approval-decision': 1,
   'thread-follower-submit-user-input': 1,
@@ -190,13 +192,13 @@ export class DesktopIpcClient extends EventEmitter {
     if (message.targetClientIds && !message.targetClientIds.includes(this.#clientId)) return;
     if(message.method==='thread-queued-followups-changed'){
       const {conversationId,messages,hostId}=message.params||{},owner=this.#subscriptions.get(conversationId);
-      if(owner&&(!hostId||hostId==='local')&&message.sourceClientId===owner&&message.version===2&&Array.isArray(messages))this.emit('queuedMessages',{conversationId,messages});return;
+      if(owner&&(!hostId||hostId==='local')&&message.sourceClientId===owner&&[2, PROTOCOL_VERSIONS[message.method]].includes(message.version)&&Array.isArray(messages))this.emit('queuedMessages',{conversationId,messages});return;
     }
     if (message.method !== 'thread-stream-state-changed') return;
     const { conversationId, hostId, change } = message.params || {};
     const owner = this.#subscriptions.get(conversationId);
     if (!owner || hostId !== 'local' || message.sourceClientId !== owner) return;
-    if (message.version !== PROTOCOL_VERSIONS[message.method]) {
+    if (![11, PROTOCOL_VERSIONS[message.method]].includes(message.version)) {
       this.emit('protocolMismatch', { method: message.method, version: message.version, conversationId });
       return;
     }
@@ -247,23 +249,23 @@ export class DesktopIpcClient extends EventEmitter {
     return response.result;
   }
 
-  startTurn(threadId, text, { ownerId, request = {}, context = {} } = {}) {
-    if (typeof text !== 'string' || !text.trim()) throw new Error('A non-empty test message is required');
+  startTurn(threadId, text, { ownerId, request = {}, context = {}, attachments=[],skills=[],cwd } = {}) {
+    if (typeof text !== 'string' || !text.trim()&&!attachments.length) throw new Error('A message or attachment is required');
+    const message=messageInput(text,{attachments,skills,cwd});
     return this.#control(threadId, 'thread-follower-start-turn', {
-      turnStart: { request: { ...request, threadId, clientUserMessageId: randomUUID(), input: [{ type: 'text', text, text_elements: [] }] }, context },
+      turnStart: { request: { ...request, threadId, clientUserMessageId: message.id, input: message.input }, context: {...context,messageThreadId:message.context.messageThreadId,restoreMessage:message.restoreMessage,attachments:message.attachments,localTurnMetadata:message.localTurnMetadata} },
     }, ownerId);
   }
 
-  steerTurn(threadId, text, { ownerId, cwd } = {}) {
-    if (typeof text !== 'string' || !text.trim()) throw new Error('A non-empty steering message is required');
-    const id = randomUUID();
+  steerTurn(threadId, text, { ownerId, cwd,attachments=[],skills=[] } = {}) {
+    if (typeof text !== 'string' || !text.trim()&&!attachments.length) throw new Error('A message or attachment is required');
+    const message=messageInput(text,{attachments,skills,cwd});
     return this.#control(threadId, 'thread-follower-steer-turn', {
-      input: [{ type: 'text', text, text_elements: [] }], clientUserMessageId: id,
-      restoreMessage: { id, text, cwd, createdAt: Date.now(),
-        context: { prompt: text, addedFiles: [], fileAttachments: [], ideContext: null, imageAttachments: [], commentAttachments: [] } },
+      input: message.input, clientUserMessageId: message.id,attachments:message.attachments,restoreMessage:message.restoreMessage,
     }, ownerId);
   }
 
+  compactThread(threadId,ownerId){return this.#control(threadId,'thread-follower-compact-thread',{},ownerId);}
   interruptTurn(threadId, expectedTurnId, ownerId) {
     if (typeof expectedTurnId !== 'string' || !expectedTurnId) throw new Error('Expected active turn ID is required');
     return this.#control(threadId, 'thread-follower-interrupt-turn', { expectedTurnId, mode: 'user-stop' }, ownerId);
