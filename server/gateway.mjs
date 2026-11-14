@@ -124,6 +124,19 @@ export function createGateway({ tls, bridge, uploads, desktopVersion = '', devic
       if (request.method === 'GET' && url.pathname === '/v1/threads') {
         reply(response, 200, { threads: await bridge.catalog(),canCreateThreads:!!bridge.allowSelectedChats&&!!bridge.chatCreator }); return;
       }
+      if (request.method === 'POST' && url.pathname === '/v1/sidebar/thread-pin') {
+        if (!bridge.movePinnedThread) throw fail(501, '请更新电脑插件以操作置顶');
+        const input = await body(request);
+        const { threadId, pinned, beforeThreadId = null } = input;
+        const validId = id => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(id);
+        if (!validId(threadId) || typeof pinned !== 'boolean' ||
+            (beforeThreadId !== null && (!pinned || beforeThreadId === threadId || !validId(beforeThreadId)))) {
+          throw fail(400, '无效的置顶操作');
+        }
+        const threads = await bridge.movePinnedThread({ threadId, pinned, beforeThreadId }, () => sessions.has(sessionHash));
+        if (!sessions.has(sessionHash)) throw fail(401, '设备授权已撤销');
+        reply(response, 200, { threads }); return;
+      }
       if(request.method==='POST'&&url.pathname==='/v1/threads/new'){
         const input=await body(request),id=request.headers['idempotency-key'];
         if(typeof input.baseThreadId!=='string'||input.name!==undefined&&(typeof input.name!=='string'||input.name.length>80))throw fail(400,'请选择项目，会话名称最多 80 字符');

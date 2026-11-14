@@ -62,12 +62,37 @@ export class DesktopBridge extends EventEmitter {
     } catch { this.scheduleReconnect(); }
   }
   async catalog() {
-    if (this.historyReader && (!this.catalogAt || Date.now() - this.catalogAt > 15000)) {
-      try { this.catalogRows = await this.historyReader.list(); this.catalogAt = Date.now(); } catch { /* Keep known chats available. */ }
+    if (this.historyReader && (!this.catalogAt || Date.now() - this.catalogAt > 4000)) {
+      this.catalogRead ??= this.historyReader.list().then(rows => {
+        this.catalogRows = rows;
+        this.catalogAt = Date.now();
+      }).catch(() => {}).finally(() => { this.catalogRead = null; });
+      await this.catalogRead;
     }
     const rows = new Map(this.catalogRows.map(row => [row.id, row]));
     for (const entry of this.entries.values()) {if(rows.get(entry.id)?.name)entry.name=rows.get(entry.id).name;rows.set(entry.id, { ...rows.get(entry.id), id: entry.id, name: entry.name });}
     return [...rows.values()];
+  }
+  async movePinnedThread({ threadId, pinned, beforeThreadId }, authorized) {
+    if (!this.allowSelectedChats || !this.historyReader?.movePinnedThread) {
+      throw Object.assign(Error('请先在电脑允许手机选择和操作所有会话'), { status: 403 });
+    }
+    const operation = (this.pinWrite || Promise.resolve()).catch(() => {}).then(async () => {
+      const rows = await this.catalog();
+      const thread = rows.find(row => row.id === threadId);
+      if (!thread || (!pinned && !thread.pinned) ||
+          (beforeThreadId && !rows.some(row => row.id === beforeThreadId && row.pinned))) {
+        throw Object.assign(Error('置顶列表已变化，请刷新后重试'), { status: 409 });
+      }
+      if (!authorized()) throw Object.assign(Error('设备授权已撤销'), { status: 401 });
+      try { await this.historyReader.movePinnedThread(threadId, pinned, beforeThreadId); }
+      catch { throw Object.assign(Error('电脑未确认置顶变更，请刷新列表查看'), { status: 409 }); }
+      await this.catalogRead;
+      this.catalogAt = 0;
+      return this.catalog();
+    });
+    this.pinWrite = operation;
+    return operation;
   }
   async usage() {
     return this.historyReader?.usage ? this.historyReader.usage() : {available:false,primary:null,secondary:null,updatedAt:null,stale:true};

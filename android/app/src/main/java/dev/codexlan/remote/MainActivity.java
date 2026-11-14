@@ -1022,6 +1022,7 @@ public final class MainActivity extends Activity {
             }
         } catch (Exception error) { status.setText("后台同步启动失败，请重新打开 App：" + error.getMessage()); }
     }
+    private boolean updatingSidebar;
     private void chooseChat() {
         if (currentState == null) { toast("尚无聊天列表，请先连接电脑"); return; }
         try {
@@ -1031,13 +1032,52 @@ public final class MainActivity extends Activity {
             ImageView searchIcon=new ImageView(this);searchIcon.setImageDrawable(new UiIcon("search",muted));searchBar.addView(searchIcon,new LinearLayout.LayoutParams(dp(20),dp(20)));searchIcon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
             EditText search = field("搜索会话");search.setBackgroundColor(Color.TRANSPARENT);search.setPadding(dp(10),dp(12),0,dp(12));search.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);searchBar.addView(search,new LinearLayout.LayoutParams(0,dp(48),1));
             LinearLayout.LayoutParams searchSpacing=new LinearLayout.LayoutParams(-1,dp(48));searchSpacing.topMargin=dp(8);searchSpacing.bottomMargin=dp(12);panel.addView(searchBar,searchSpacing);
+            ChatFolders[] sidebar={null};
             ChatFolders folders=new ChatFolders(this,rows,api==null?"":api.fingerprint,selectedThreadId,id->{
                 drafts.put(selectedThreadId,composer.getText().toString());selectedThreadId=id;composer.setText(drafts.containsKey(id)?drafts.get(id):"");
                 try{render(currentState);}catch(Exception ignored){}beginPolling();drawer.dismiss();
-            },id->{drawer.dismiss();createProjectChat(id);});panel.addView(folders,new LinearLayout.LayoutParams(-1,0,1));
+            },id->{drawer.dismiss();createProjectChat(id);},(id,pinned,before)->{
+                RemoteApi owner=api;
+                if(owner==null||currentState==null||!currentState.optBoolean("online")){toast("请先连接电脑");return;}
+                if(updatingSidebar)return;
+                updatingSidebar=true;
+                worker.execute(()->{
+                    RemoteApi channel=owner.readChannel();
+                    try{
+                        JSONArray catalog=channel.call("POST","/v1/sidebar/thread-pin",new JSONObject()
+                            .put("threadId",id).put("pinned",pinned).put("beforeThreadId",before==null?JSONObject.NULL:before),null).getJSONArray("threads");
+                        runOnUiThread(()->{
+                            if(api!=owner||isDestroyed())return;
+                            try{if(drawer.isShowing())sidebar[0].updateCatalog(catalog);}catch(Exception ignored){}
+                        });
+                    }catch(Exception failure){runOnUiThread(()->{if(api==owner&&!isDestroyed())toast(error(failure));});}
+                    finally{channel.cancel();runOnUiThread(()->updatingSidebar=false);}
+                });
+            });
+            sidebar[0]=folders;
+            panel.addView(folders,new LinearLayout.LayoutParams(-1,0,1));
             search.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence s,int a,int c,int f){}public void onTextChanged(CharSequence s,int start,int before,int count){folders.query(s.toString());}public void afterTextChanged(android.text.Editable e){}});
             settingRow(panel,"设置","电脑连接、EasyTier 与通知",()->{drawer.dismiss();settingsPage();});
-            drawer.show();android.view.Window window=drawer.getWindow();window.setBackgroundDrawableResource(android.R.color.transparent);
+            Runnable sidebarRefresh=new Runnable(){
+                @Override public void run(){
+                    if(!drawer.isShowing()||isDestroyed())return;
+                    RemoteApi owner=api;
+                    if(owner==null||updatingSidebar){renderHandler.postDelayed(this,4000);return;}
+                    worker.execute(()->{
+                        RemoteApi channel=owner.readChannel();
+                        try{
+                            JSONArray catalog=channel.call("GET","/v1/threads",null,null,3000,5000).getJSONArray("threads");
+                            runOnUiThread(()->{if(api==owner&&drawer.isShowing()&&!updatingSidebar)
+                                try{folders.updateCatalog(catalog);}catch(Exception ignored){}});
+                        }catch(Exception ignored){}
+                        finally{channel.cancel();runOnUiThread(()->{if(drawer.isShowing())renderHandler.postDelayed(this,4000);});}
+                    });
+                }
+            };
+            drawer.setOnDismissListener(d->renderHandler.removeCallbacks(sidebarRefresh));
+            drawer.show();
+            renderHandler.post(sidebarRefresh);
+            android.view.Window window=drawer.getWindow();window.setBackgroundDrawableResource(android.R.color.transparent);
             int width=android.os.Build.VERSION.SDK_INT>=30?getWindowManager().getCurrentWindowMetrics().getBounds().width():getResources().getDisplayMetrics().widthPixels;boolean compact=width/getResources().getDisplayMetrics().density<600;
             window.setLayout(compact?-1:Math.min(width-dp(28),dp(400)),-1);window.setGravity(android.view.Gravity.START);
             if(compact){window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);fullWindow(window);}

@@ -1,4 +1,4 @@
-// Separate read-only app-server for persisted metadata/history. Never resumes a thread.
+// Separate app-server for persisted history and sidebar metadata. Never resumes a thread.
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { turnTimeline, turnInput } from './turn-timeline.mjs';
@@ -42,7 +42,7 @@ export class HistoryReader {
     this.initialized = true;
   }
   request(method, params) {
-    if (!['initialize', 'thread/list', 'thread/turns/list', 'thread/queue/list', 'skills/list', 'model/list', 'account/rateLimits/read'].includes(method)) throw Error('历史客户端禁止该操作');
+    if (!['initialize', 'thread/list', 'thread/section/move', 'thread/turns/list', 'thread/queue/list', 'skills/list', 'model/list', 'account/rateLimits/read'].includes(method)) throw Error('历史客户端禁止该操作');
     return new Promise((resolve, reject) => {
       const id = ++this.sequence;
       const timer = setTimeout(() => { this.pending.delete(id); reject(Error('历史读取超时')); }, 15000);
@@ -68,6 +68,12 @@ export class HistoryReader {
     const sidebar=await this.sidebarReader();
     try{const pinned=[];let cursor;const seen=new Set();do{const page=await this.request('thread/list',{limit:100,sectionId:PINNED_SECTION_ID,sortKey:'section_position',...(cursor?{cursor}:{})});pinned.push(...(page.data||[]).map(row=>row.id));cursor=page.nextCursor;if(cursor&&seen.has(cursor))throw Error('置顶分页游标重复');if(cursor)seen.add(cursor);}while(cursor);sidebar._desktopPinnedIds=pinned;}catch{ /* Older desktop versions retain legacy pin order. */ }
     return groupThreads([...new Map(threads.map(row=>[row.id,row])).values()], sidebar);
+  }
+  async movePinnedThread(threadId, pinned, beforeThreadId) {
+    await this.connect();
+    await this.request('thread/section/move', {
+      threadId, sectionId: pinned ? PINNED_SECTION_ID : null, beforeThreadId,
+    });
   }
   async localQueuedMessages(threadId){
     const sidebar=await this.sidebarReader();const rows=sidebar['queued-follow-ups']?.[threadId];return Array.isArray(rows)?rows:[];
