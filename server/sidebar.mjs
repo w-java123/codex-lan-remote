@@ -23,7 +23,7 @@ export function groupThreads(threads, state = {}) {
     const assigned = assignments[thread.id];
     const project = projects.find(p => p.id === (assigned?.projectId || thread.projectId)) || (!projectless.has(thread.id) && !assigned && projects.filter(p => (p.rootPaths || []).some(root => normalized(thread.cwd) === normalized(root) || normalized(thread.cwd).startsWith(normalized(root) + '/'))).sort((a,b) => Math.max(...b.rootPaths.map(x=>x.length))-Math.max(...a.rootPaths.map(x=>x.length)))[0]);
     const section = thread.section;
-    const pinIndex=pinned.indexOf(thread.id),isPinned=pinIndex>=0||section?.id===PINNED_SECTION_ID;
+    const pinIndex=pinned.indexOf(thread.id),isPinned=pinIndex>=0||(!state._desktopPinnedIds&&section?.id===PINNED_SECTION_ID);
     const projectPinIndex=project?pinnedProjects.indexOf(project.id):-1;
     const groupId = section?.id || (project ? 'project:' + project.id : 'chats');
     const positions = manual[project?.id] || [];

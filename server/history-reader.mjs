@@ -66,7 +66,8 @@ export class HistoryReader {
     } while(cursor);
     this.threadDirectories=new Map(threads.filter(row=>typeof row.cwd==='string'&&row.cwd).map(row=>[row.id,row.cwd]));
     const sidebar=await this.sidebarReader();
-    try{const pinned=[];let cursor;const seen=new Set();do{const page=await this.request('thread/list',{limit:100,sectionId:PINNED_SECTION_ID,sortKey:'section_position',...(cursor?{cursor}:{})});pinned.push(...(page.data||[]).map(row=>row.id));cursor=page.nextCursor;if(cursor&&seen.has(cursor))throw Error('置顶分页游标重复');if(cursor)seen.add(cursor);}while(cursor);sidebar._desktopPinnedIds=pinned;}catch{ /* Older desktop versions retain legacy pin order. */ }
+    const listedIds=new Set(threads.map(row=>row.id));
+    try{const pinned=[];let cursor;const seen=new Set();do{const page=await this.request('thread/list',{limit:100,sectionId:PINNED_SECTION_ID,sortKey:'section_position',...(cursor?{cursor}:{})});const rows=(page.data||[]).filter(row=>!row.ephemeral);pinned.push(...rows.map(row=>row.id));for(const row of rows)if(!listedIds.has(row.id)){threads.push(row);listedIds.add(row.id);}cursor=page.nextCursor;if(cursor&&seen.has(cursor))throw Error('置顶分页游标重复');if(cursor)seen.add(cursor);}while(cursor);sidebar._desktopPinnedIds=pinned;}catch{ /* Older desktop versions retain legacy pin order. */ }
     return groupThreads([...new Map(threads.map(row=>[row.id,row])).values()], sidebar);
   }
   async movePinnedThread(threadId, pinned, beforeThreadId) {
