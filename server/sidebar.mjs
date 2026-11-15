@@ -13,10 +13,19 @@ export function groupThreads(threads, state = {}) {
   const projectless = new Set(state['projectless-thread-ids'] || []);
   const order = state['project-order'] || [];
   const manual = state['sidebar-project-thread-orders'] || {};
-  const prefs = state['electron-persisted-atom-state']?.['flat-project-sidebar-preferences-v1'] || {};
+  const ownerStates = Object.entries(state).filter(([key]) => key.startsWith('electron-owner-atoms:'));
+  const owner = ownerStates.length === 1 ? ownerStates[0][1] : undefined;
+  const atoms = { ...state['electron-persisted-atom-state'], ...owner };
+  const prefs = atoms['flat-project-sidebar-preferences-v1'] || {};
   const pinned=state._desktopPinnedIds??state['pinned-thread-ids']??[];
-  const pinnedProjects=state['pinned-project-ids']||[];
-  const unified=state['electron-persisted-atom-state']?.['unified-sidebar-project-order-v1'];
+  const projectPins = state['pinned-project-ids'] || [];
+  const unifiedPins = atoms['unified-sidebar-pinned-order-v1'];
+  const orderedPins = Array.isArray(unifiedPins)
+    ? unifiedPins.filter(key => typeof key === 'string' && key.startsWith('codex:project:'))
+      .map(key => key.slice(14)).filter(id => projectPins.includes(id))
+    : [];
+  const pinnedProjects = [...new Set([...orderedPins, ...projectPins])];
+  const unified=atoms['unified-sidebar-project-order-v1'];
   const projectOrder=Array.isArray(unified)?unified.filter(id=>typeof id==='string'&&id.startsWith('codex:project:')).map(id=>id.slice(14)):order;
   const normalized = value => String(value || '').replaceAll('\\', '/').replace(/\/$/, '').toLowerCase();
   const result = threads.map((thread, index) => {
