@@ -37,7 +37,7 @@ export function groupThreads(threads, state = {}) {
     const groupId = section?.id || (project ? 'project:' + project.id : 'chats');
     const positions = manual[project?.id] || [];
     const manualIndex = Array.isArray(positions) ? positions.indexOf(thread.id) : -1;
-    return { id:thread.id, name:thread.name || thread.preview?.slice(0,70) || '未命名聊天', updatedAt:thread.updatedAt,
+    return { id:thread.id, name:thread.name || thread.preview?.slice(0,70) || '未命名聊天', updatedAt:thread.updatedAt, unread:thread.readState?.firstUnread != null,
       groupId:isPinned?'pinned':groupId, groupName:isPinned?'置顶':section?.name || project?.name || '其他会话',pinned:isPinned,projectPinned:!isPinned&&!section&&projectPinIndex>=0,
       groupOrder:isPinned?-20000:section ? -1 : projectPinIndex>=0?-10000+projectPinIndex:project ? (projectOrder.indexOf(project.id) < 0 ? projectOrder.length : projectOrder.indexOf(project.id)) : projectOrder.length + 1,
       order:isPinned?(pinIndex<0?index:pinIndex):prefs.chatSortMode === 'manual' && manualIndex >= 0 ? manualIndex : index };

@@ -27,6 +27,19 @@ final class ChatFolders extends ListView {
             TextView title=text(header?row.optString("groupName","其他会话"):row.optString("name","桌面聊天"),header?14:15,palette.foreground);title.setMaxLines(header?1:2);title.setEllipsize(android.text.TextUtils.TruncateAt.END);if(header)title.setTypeface(null,Typeface.BOLD);labels.addView(title);
             if(header){TextView count=text(String.valueOf(row.optInt("count")),12,palette.muted);count.setPadding(dp(6),0,dp(8),0);box.addView(count);ImageView arrow=new ImageView(activity);arrow.setImageDrawable(new UiIcon("next",palette.muted));boolean expanded=expanded(row.optString("groupId"));arrow.setRotation(expanded?90:0);box.addView(arrow,new LinearLayout.LayoutParams(dp(15),dp(15)));box.setContentDescription(title.getText()+"，"+(expanded?"收起":"展开")+"，"+row.optInt("count")+" 个会话");box.setOnClickListener(v->{if(!query.isEmpty())return;String group=row.optString("groupId");preferences.edit().putBoolean(computer+":"+group,!expanded).apply();arrow.animate().rotation(expanded?0:90).setDuration(140).start();if(!expanded){animateGroup=group;postDelayed(()->animateGroup="",350);}postDelayed(()->rebuild(true),100);});}
             else{String detail=row.optString("id").equals(selected)?"当前会话":row.optBoolean("ready")?"实时已连接":row.optBoolean("historyReady")?"历史已同步":"正在同步历史";TextView subtitle=text(detail,11,palette.muted);subtitle.setPadding(0,dp(3),0,0);labels.addView(subtitle);box.setOnClickListener(v->open.accept(row.optString("id")));if(animateGroup.equals(row.optString("groupId","chats"))){box.setAlpha(.3f);box.setTranslationY(-dp(4));box.animate().alpha(1).translationY(0).setDuration(150).start();}else{box.setAlpha(1);box.setTranslationY(0);}}
+            if(!header&&row.optBoolean("unread")){
+                View dot=new View(activity);
+                GradientDrawable badge=new GradientDrawable();
+                badge.setShape(GradientDrawable.OVAL);
+                badge.setColor(0xff1675df);
+                dot.setBackground(badge);
+                dot.setContentDescription("有未读消息");
+                dot.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+                LinearLayout.LayoutParams badgeSpace=new LinearLayout.LayoutParams(dp(8),dp(8));
+                badgeSpace.leftMargin=dp(6);
+                badgeSpace.rightMargin=dp(6);
+                box.addView(dot,badgeSpace);
+            }
             box.setOnLongClickListener(null);
             box.setLongClickable(false);
             if(!header){
@@ -77,7 +90,7 @@ final class ChatFolders extends ListView {
     private TextView text(String value,int size,int color){TextView view=new TextView(activity);view.setText(value);view.setTextColor(color);view.setTextSize(size);return view;}
     private boolean expanded(String group){boolean current=false;for(JSONObject row:rows)if(row.optString("id").equals(selected)&&row.optString("groupId","chats").equals(group))current=true;return !query.isEmpty()||preferences.getBoolean(computer+":"+group,current||group.equals("pinned"));}
     void query(String value){query=value.trim().toLowerCase(Locale.ROOT);rebuild(true);}
-    private void rebuild(boolean force){StringBuilder next=new StringBuilder(query);for(JSONObject row:rows)next.append(row.optString("id")).append(row.optString("name")).append(row.optString("groupId")).append(row.optString("groupName")).append(row.optBoolean("projectPinned")).append(row.optInt("groupOrder")).append(row.optInt("order")).append(row.optBoolean("ready")).append(row.optBoolean("historyReady"));if(!force&&next.toString().equals(signature))return;signature=next.toString();
+    private void rebuild(boolean force){StringBuilder next=new StringBuilder(query);for(JSONObject row:rows)next.append(row.optString("id")).append(row.optString("name")).append(row.optString("groupId")).append(row.optString("groupName")).append(row.optBoolean("projectPinned")).append(row.optInt("groupOrder")).append(row.optInt("order")).append(row.optBoolean("ready")).append(row.optBoolean("historyReady")).append(row.optBoolean("unread"));if(!force&&next.toString().equals(signature))return;signature=next.toString();
         int first=getFirstVisiblePosition(),offset=getChildCount()==0?0:getChildAt(0).getTop();visible.clear();headers.clear();LinkedHashMap<String,List<JSONObject>> groups=new LinkedHashMap<>();for(JSONObject row:rows){if(!row.optString("name").toLowerCase(Locale.ROOT).contains(query)&&!row.optString("groupName").toLowerCase(Locale.ROOT).contains(query))continue;groups.computeIfAbsent(row.optString("groupId","chats"),k->new ArrayList<>()).add(row);}
         for(Map.Entry<String,List<JSONObject>> group:groups.entrySet()){try{JSONObject source=group.getValue().get(0),header=new JSONObject().put("id","folder:"+group.getKey()).put("groupId",group.getKey()).put("groupName",source.optString("groupName","其他会话")).put("count",group.getValue().size()).put("projectPinned",source.optBoolean("projectPinned")).put("baseThreadId",group.getKey().startsWith("project:")?source.optString("id"):"");headers.add(header.getString("id"));visible.add(header);if(expanded(group.getKey()))visible.addAll(group.getValue());}catch(Exception ignored){}}
         if(visible.isEmpty())try{JSONObject empty=new JSONObject().put("id","folder:empty").put("groupId","empty").put("groupName","没有找到匹配的会话").put("count",0);headers.add("folder:empty");visible.add(empty);}catch(Exception ignored){}
