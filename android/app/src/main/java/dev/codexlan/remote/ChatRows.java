@@ -20,6 +20,9 @@ final class ChatRows {
         return changed?text:value;
     }
     static String userText(String value){
+        return userText(value, "附件");
+    }
+    static String userText(String value, String attachmentOnlyLabel){
         String text=stripAmbient(value),wrapper=text.trim();
         if(wrapper.startsWith("# Files mentioned by the user:")||wrapper.startsWith("# Files pasted by the user:")){
             text=wrapper;
@@ -27,7 +30,7 @@ final class ChatRows {
             if(request.find())text=text.substring(request.end()).trim();
             else text="";
             text=text.replaceAll("<image\\b[^>]*>\\s*(?:</image>)?","").trim();
-            return text.isEmpty()?"附件":displayText(text);
+            return text.isEmpty()?attachmentOnlyLabel:displayText(text);
         }
         return text.isEmpty()?"已同步页面上下文":displayText(text);
     }
