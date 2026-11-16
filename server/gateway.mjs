@@ -50,6 +50,9 @@ export function createGateway({ tls, bridge, uploads, desktopVersion = '', devic
   };
   let version = 0, fileReads = 0, historyReads = 0;
   const waiters = new Set();
+  const sidebarWaiters = new Set();
+  const sidebarChanged = () => { for (const wake of sidebarWaiters) wake(true); };
+  bridge.on('sidebarChanged', sidebarChanged);
   let publishTimer;
   // Full mobile snapshots are coalesced; never resend the last 50 turns per token.
   const changed = () => {
@@ -122,7 +125,21 @@ export function createGateway({ tls, bridge, uploads, desktopVersion = '', devic
         changed(); reply(response, 200, { revoked: true }); return;
       }
       if (request.method === 'GET' && url.pathname === '/v1/threads') {
-        reply(response, 200, { threads: await bridge.catalog(),canCreateThreads:!!bridge.allowSelectedChats&&!!bridge.chatCreator }); return;
+        const revision = bridge.sidebarRevision;
+        if (revision !== undefined && url.searchParams.get('sidebarAfter') === String(revision)) {
+          if (sidebarWaiters.size >= 32) throw fail(429, '连接过多');
+          await new Promise(resolve => {
+            const done = changed => { clearTimeout(timer); sidebarWaiters.delete(done); response.off('close', done); resolve(changed); };
+            const timer = setTimeout(() => done(false), 4000);
+            sidebarWaiters.add(done);
+            response.once('close', done);
+          });
+          if (response.destroyed) return;
+        }
+        const sidebarRevision = bridge.sidebarRevision;
+        const threads = await bridge.catalog();
+        if (!sessions.has(sessionHash)) throw fail(401, '设备授权已撤销');
+        reply(response, 200, { threads, sidebarRevision, canCreateThreads:!!bridge.allowSelectedChats&&!!bridge.chatCreator }); return;
       }
       if (request.method === 'POST' && url.pathname === '/v1/sidebar/thread-pin') {
         if (!bridge.movePinnedThread) throw fail(501, '请更新电脑插件以操作置顶');
@@ -225,7 +242,7 @@ export function createGateway({ tls, bridge, uploads, desktopVersion = '', devic
     } catch (error) { reply(response, error.status || 500, { error: error.status ? error.message : '服务请求失败' }); }
   });
   server.requestTimeout = 30000; server.headersTimeout = 10000; server.maxConnections = 40;
-  server.on('close', () => { clearTimeout(publishTimer); bridge.off('changed', changed); for (const wake of [...waiters]) wake(); });
+  server.on('close', () => { clearTimeout(publishTimer); bridge.off('changed', changed); bridge.off('sidebarChanged', sidebarChanged); sidebarChanged(); for (const wake of [...waiters]) wake(); });
   return {
     createListener() { return https.createServer({ ...tls, minVersion: 'TLSv1.2', maxHeaderSize: 8192 }, server.listeners('request')[0]); },
     server,

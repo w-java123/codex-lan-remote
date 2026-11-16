@@ -1,3 +1,4 @@
+import { watchDesktopSidebar } from './sidebar.mjs';
 import { EventEmitter } from 'node:events';
 import { DesktopIpcClient } from './desktop-ipc.mjs';
 import { ThreadState, getTurns, summarizeThread, activeTurn } from './thread-state.mjs';
@@ -16,6 +17,12 @@ export class DesktopBridge extends EventEmitter {
     this.autoTitles=autoTitles;
     this.openDesktopChat = openDesktopChat;
     this.catalogRows = threads;
+    this.sidebarRevision = 0;
+    if (historyReader) this.stopSidebarWatch = watchDesktopSidebar(() => {
+      this.sidebarRevision++;
+      this.catalogAt = 0;
+      this.emit('sidebarChanged');
+    });
     this.clientFactory = clientFactory;
     this.generation = 0;
     this.closed = false;
@@ -63,9 +70,10 @@ export class DesktopBridge extends EventEmitter {
   }
   async catalog() {
     if (this.historyReader && (!this.catalogAt || Date.now() - this.catalogAt > 4000)) {
+      const revision = this.sidebarRevision;
       this.catalogRead ??= this.historyReader.list().then(rows => {
         this.catalogRows = rows;
-        this.catalogAt = Date.now();
+        this.catalogAt = revision === this.sidebarRevision ? Date.now() : 0;
       }).catch(() => {}).finally(() => { this.catalogRead = null; });
       await this.catalogRead;
     }
@@ -418,5 +426,5 @@ export class DesktopBridge extends EventEmitter {
     entry.modelSettings=await this.client.readModelSettings(threadId,entry.owner);
     return {models:this.modelCatalog,current:{model:entry.modelSettings?.model||'',effort:entry.modelSettings?.reasoningEffort||'',serviceTier:entry.store.state?.latestThreadSettings?.serviceTier??'default'}};
   }
-  close() { this.closed = true; ++this.generation; clearTimeout(this.reconnectTimer); clearInterval(this.refreshTimer);for(const entry of this.entries.values())clearTimeout(entry.repairTimer);this.client?.close(); this.historyReader?.close();this.autoTitles?.close();if(this.backgroundHistoryReader!==this.historyReader)this.backgroundHistoryReader?.close(); }
+  close() { this.stopSidebarWatch?.(); this.closed = true; ++this.generation; clearTimeout(this.reconnectTimer); clearInterval(this.refreshTimer);for(const entry of this.entries.values())clearTimeout(entry.repairTimer);this.client?.close(); this.historyReader?.close();this.autoTitles?.close();if(this.backgroundHistoryReader!==this.historyReader)this.backgroundHistoryReader?.close(); }
 }

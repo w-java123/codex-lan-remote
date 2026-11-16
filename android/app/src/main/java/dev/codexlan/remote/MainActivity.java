@@ -1059,6 +1059,7 @@ public final class MainActivity extends Activity {
             search.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence s,int a,int c,int f){}public void onTextChanged(CharSequence s,int start,int before,int count){folders.query(s.toString());}public void afterTextChanged(android.text.Editable e){}});
             settingRow(panel,"设置","电脑连接、EasyTier 与通知",()->{drawer.dismiss();settingsPage();});
             Runnable sidebarRefresh=new Runnable(){
+                private String revision;
                 @Override public void run(){
                     if(!drawer.isShowing()||isDestroyed())return;
                     RemoteApi owner=api;
@@ -1066,11 +1067,21 @@ public final class MainActivity extends Activity {
                     worker.execute(()->{
                         RemoteApi channel=owner.readChannel();
                         try{
-                            JSONArray catalog=channel.call("GET","/v1/threads",null,null,3000,5000).getJSONArray("threads");
-                            runOnUiThread(()->{if(api==owner&&drawer.isShowing()&&!updatingSidebar)
-                                try{folders.updateCatalog(catalog);}catch(Exception ignored){}});
-                        }catch(Exception ignored){}
-                        finally{channel.cancel();runOnUiThread(()->{if(drawer.isShowing())renderHandler.postDelayed(this,4000);});}
+                            String path="/v1/threads"+(revision==null?"":"?sidebarAfter="+revision);
+                            JSONObject result=channel.call("GET",path,null,null,3000,9000);
+                            JSONArray catalog=result.getJSONArray("threads");
+                            String nextRevision=result.has("sidebarRevision")?result.optString("sidebarRevision"):null;
+                            runOnUiThread(()->{
+                                if(!drawer.isShowing())return;
+                                if(api==owner&&!updatingSidebar){
+                                    revision=nextRevision;
+                                    try{folders.updateCatalog(catalog);}catch(Exception ignored){}
+                                }
+                                renderHandler.postDelayed(this,nextRevision==null?4000:250);
+                            });
+                        }catch(Exception ignored){
+                            runOnUiThread(()->{if(drawer.isShowing())renderHandler.postDelayed(this,4000);});
+                        }finally{channel.cancel();}
                     });
                 }
             };
