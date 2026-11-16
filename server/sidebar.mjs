@@ -57,7 +57,7 @@ export function groupThreads(threads, state = {}) {
   });
   if(prefs.projectSortMode==='updated_at'){
     const newest=new Map();for(const row of result)if(row.groupId.startsWith('project:')&&!row.projectPinned)newest.set(row.groupId,Math.max(newest.get(row.groupId)||0,Number(row.updatedAt)||0));
-    const ids=[...newest.keys()].sort((a,b)=>newest.get(b)-newest.get(a));for(const row of result)if(row.groupId.startsWith('project:')&&!row.projectPinned)row.groupOrder=ids.indexOf(row.groupId);
+    const ids=[...newest.keys()].sort((a,b)=>newest.get(b)-newest.get(a));for(const row of result)if(row.groupId.startsWith('project:')&&!row.projectPinned&&row.groupOrder===projectOrder.length)row.groupOrder+=ids.indexOf(row.groupId);
   }
   if(prefs.mode==='list'||prefs.mode==='connection')for(const row of result)if(row.groupId==='chats'||row.groupId.startsWith('project:')){row.groupId='chats';row.groupName=prefs.mode==='connection'?'这台电脑':'全部会话';row.groupOrder=order.length+1;}
   return result.sort((a,b) => a.groupOrder-b.groupOrder || a.groupId.localeCompare(b.groupId) || a.order-b.order);
