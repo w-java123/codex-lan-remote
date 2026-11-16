@@ -1068,7 +1068,7 @@ public final class MainActivity extends Activity {
                         RemoteApi channel=owner.readChannel();
                         try{
                             String path="/v1/threads"+(revision==null?"":"?sidebarAfter="+revision);
-                            JSONObject result=channel.call("GET",path,null,null,3000,9000);
+                            JSONObject result=channel.call("GET",path,null,null,3000,30000);
                             JSONArray catalog=result.getJSONArray("threads");
                             String nextRevision=result.has("sidebarRevision")?result.optString("sidebarRevision"):null;
                             runOnUiThread(()->{
