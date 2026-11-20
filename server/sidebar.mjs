@@ -1,4 +1,5 @@
 import { watchFile, unwatchFile } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -20,9 +21,18 @@ export function groupThreads(threads, state = {}) {
   const order = state['project-order'] || [];
   const manual = state['sidebar-project-thread-orders'] || {};
   const ownerStates = Object.entries(state).filter(([key]) => key.startsWith('electron-owner-atoms:'));
-  const owner = ownerStates.length === 1 ? ownerStates[0][1] : undefined;
+  const owner = state['electron-owner-atoms:' + state['electron-renderer-content-owner']]
+    ?? (ownerStates.length === 1 ? ownerStates[0][1] : undefined);
   const atoms = { ...state['electron-persisted-atom-state'], ...owner };
   const prefs = atoms['flat-project-sidebar-preferences-v1'] || {};
+  const identity = atoms['local-document-identity'];
+  const identityKey = identity?.accountId && identity?.userId
+    ? createHash('sha256').update(JSON.stringify(['chatgpt', identity.accountId, identity.userId])).digest('hex')
+    : undefined;
+  const unreadHosts = state['electron-thread-read-state-v1']?.unreadByIdentity?.[identityKey];
+  const localUnread = Object.entries(unreadHosts || {}).filter(([host]) => host.startsWith('local:'));
+  const unreadIds = localUnread.length === 1 && Array.isArray(localUnread[0][1])
+    ? new Set(localUnread[0][1]) : undefined;
   const pinned=state._desktopPinnedIds??state['pinned-thread-ids']??[];
   const projectPins = state['pinned-project-ids'] || [];
   const unifiedPins = atoms['unified-sidebar-pinned-order-v1'];
@@ -50,7 +60,7 @@ export function groupThreads(threads, state = {}) {
     const desktopPosition = projectPinIndex >= 0 ? pinnedProjectThreads.indexOf(thread.id) : -1;
     const manualIndex = prefs.chatSortMode === 'manual' ? positions.indexOf(thread.id) : -1;
     const projectPosition = desktopPosition >= 0 ? desktopPosition : manualIndex;
-    return { id:thread.id, name:thread.name || thread.preview?.slice(0,70) || '未命名聊天', updatedAt:thread.updatedAt, unread:thread.readState?.firstUnread != null,
+    return { id:thread.id, name:thread.name || thread.preview?.slice(0,70) || '未命名聊天', updatedAt:thread.updatedAt, unread:unreadIds ? unreadIds.has(thread.id) : thread.readState?.firstUnread != null,
       groupId:isPinned?'pinned':groupId, groupName:isPinned?'置顶':section?.name || project?.name || '其他会话',pinned:isPinned,projectPinned:!isPinned&&!section&&projectPinIndex>=0,
       groupOrder:isPinned?-20000:section ? -1 : projectPinIndex>=0?-10000+projectPinIndex:project ? (projectOrder.indexOf(project.id) < 0 ? projectOrder.length : projectOrder.indexOf(project.id)) : projectOrder.length + 1,
       order:isPinned?(pinIndex<0?index:pinIndex):projectPosition >= 0 ? projectPosition : pinnedProjectThreads.length + positions.length + index };
