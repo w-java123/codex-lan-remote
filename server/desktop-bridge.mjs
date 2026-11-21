@@ -180,13 +180,18 @@ export class DesktopBridge extends EventEmitter {
         const canActivate = () => selection && this.desktopSelection === selection &&
           !this.closed && generation === this.generation && this.entries.get(entry.id) === entry &&
           entry.writable && this.openDesktopChat;
+        if (!client?.initialized && canActivate() && !selection.launchAt) {
+          selection.launchAt = Date.now();
+          await this.openDesktopChat(entry.id);
+          return;
+        }
         let owner;
         try {
           owner = await client.discoverOwner(entry.id);
         } catch (error) {
           // A phone selection can arrive while background owner discovery is in flight.
           if (entry.pendingSelection === this.desktopSelection) selection = entry.pendingSelection;
-          if (error.reason !== 'no-client-found' || !canActivate()) throw error;
+          if (error.reason !== 'no-client-found' || !canActivate() || selection.launchAt) throw error;
           if (entry.pendingSelection === selection) delete entry.pendingSelection;
           selection.launchAt = Date.now();
           await this.openDesktopChat(entry.id);
