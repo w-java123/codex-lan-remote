@@ -4,10 +4,11 @@ import { DesktopIpcClient } from './desktop-ipc.mjs';
 import { ThreadState, getTurns, summarizeThread, activeTurn } from './thread-state.mjs';
 import { pendingQuestions, pendingAttention, validateAnswers } from './user-questions.mjs';
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { messageInput } from './message-input.mjs';
 
 export class DesktopBridge extends EventEmitter {
-  constructor(threads, { clientFactory = options => new DesktopIpcClient(options), historyReader,backgroundHistoryReader=historyReader, allowSelectedChats = false,chatCreator,autoTitles,openDesktopChat } = {}) {
+  constructor(threads, { clientFactory = options => new DesktopIpcClient(options), historyReader,backgroundHistoryReader=historyReader, allowSelectedChats = false,chatCreator,autoTitles,openDesktopChat,appTools } = {}) {
     super();
     this.entries = new Map(threads.map(thread => [thread.id, { ...thread, writable: true, history: [], store: new ThreadState(), ready: false, consumed: new Set() }]));
     this.historyReader = historyReader;
@@ -16,6 +17,7 @@ export class DesktopBridge extends EventEmitter {
     this.chatCreator=chatCreator;
     this.autoTitles=autoTitles;
     this.openDesktopChat = openDesktopChat;
+    this.appTools = appTools;
     this.catalogRows = threads;
     this.sidebarRevision = 0;
     if (historyReader) this.stopSidebarWatch = watchDesktopSidebar(() => {
@@ -33,6 +35,15 @@ export class DesktopBridge extends EventEmitter {
       }
     }, 10000);
     this.refreshTimer.unref();
+    if(appTools){
+      this.appToolsTimer=setInterval(()=>{
+        const entry=this.entries.get(this.desktopSelection?.id);
+        if(entry&&this.canUseAppTools(entry))void this.refreshAppTools(entry).then(available=>{
+          if(available)void this.readAppToolsHistory(entry).catch(()=>{});
+        });
+      },1500);
+      this.appToolsTimer.unref();
+    }
   }
   async connect() {
     if (this.closed) return;
@@ -180,6 +191,7 @@ export class DesktopBridge extends EventEmitter {
         const canActivate = () => selection && this.desktopSelection === selection &&
           !this.closed && generation === this.generation && this.entries.get(entry.id) === entry &&
           entry.writable && this.openDesktopChat;
+        if (selection && this.canUseAppTools(entry) && await this.refreshAppTools(entry,selection)) return;
         if (!client?.initialized && canActivate() && !selection.launchAt) {
           selection.launchAt = Date.now();
           await this.openDesktopChat(entry.id);
@@ -242,6 +254,94 @@ export class DesktopBridge extends EventEmitter {
       if(entry.repairPending&&!this.closed&&generation===this.generation){entry.repairTimer=setTimeout(()=>void this.hydrate(entry,generation),250);entry.repairTimer.unref();}
     }
   }
+  canUseAppTools(entry) {
+    return !!this.appTools && entry.writable && !this.closed && !this.client?.initialized && this.entries.get(entry.id)===entry;
+  }
+
+  async refreshAppTools(entry,selection) {
+    if(!this.canUseAppTools(entry))return false;
+    if(entry.appToolsChecking){
+      const result=await entry.appToolsChecking;
+      if(!selection||entry.appToolsStatus!=='notLoaded')return result;
+    }
+    const selected=()=>this.canUseAppTools(entry)&&selection&&this.desktopSelection===selection;
+    const refresh=(async()=>{
+      let status;
+      try {
+        status=await this.appTools.status(entry.id);
+        if(status==='notLoaded'&&selected()&&this.openDesktopChat&&!selection.launchAt){
+          selection.launchAt=Date.now();
+          await this.openDesktopChat(entry.id);
+          for(let attempt=0;attempt<16&&selected()&&status==='notLoaded';attempt++){
+            await delay(250);
+            if(selected())status=await this.appTools.status(entry.id);
+          }
+        }
+      }catch{status=undefined;}
+      if(!this.canUseAppTools(entry))return false;
+      const changed=entry.appToolsStatus!==status;
+      entry.appToolsStatus=status;
+      if(status==='idle'&&!entry.appToolsPending)this.recordSelectionReady(entry);
+      if(changed)this.emit('changed');
+      return !!status;
+    })();
+    entry.appToolsChecking=refresh;
+    try{return await refresh;}
+    finally{if(entry.appToolsChecking===refresh)delete entry.appToolsChecking;}
+  }
+
+  async readAppToolsHistory(entry) {
+    if(entry.appToolsHistory)return entry.appToolsHistory;
+    const reading=this.historyReader.turns(entry.id,{limit:15}).then(turns=>{
+      if(this.closed||this.entries.get(entry.id)!==entry)return turns;
+      const recentIds=new Set(turns.map(turn=>turn.id));
+      const history=[...entry.history.filter(turn=>!recentIds.has(turn.id)),...turns].slice(-50);
+      const changed=!entry.historyReady||JSON.stringify(entry.history)!==JSON.stringify(history);
+      entry.history=history;
+      entry.historyReady=true;
+      const command=entry.appToolsPending;
+      if(command&&turns.some(turn=>(turn.timeline||[]).some(item=>
+        item.delivery==='desktop-delegation'&&!command.seen.has(item.id)&&item.text.trim()===command.text))){
+        command.delivered=true;
+        delete entry.appToolsPending;
+        this.emit('changed');
+      }else if(changed)this.emit('changed');
+      return turns;
+    });
+    entry.appToolsHistory=reading;
+    try{return await reading;}
+    finally{if(entry.appToolsHistory===reading)delete entry.appToolsHistory;}
+  }
+
+  async sendWithAppTools(entry,command) {
+    const text=command.text?.trim();
+    if(command.op!=='start'||!text||text.startsWith('/')||command.attachments?.length){
+      throw Error('当前桌面连接仅支持空闲会话的纯文本发送');
+    }
+    if(entry.appToolsPending)throw Error('上一条消息还在核对，请在桌面查看，避免重复发送');
+    const turns=await this.readAppToolsHistory(entry);
+    const status=await this.appTools.status(entry.id);
+    if(!this.canUseAppTools(entry)||status!=='idle'||entry.appToolsPending)throw Error('桌面会话尚不可写，请刷新');
+    if(command.authorized?.()===false)throw Object.assign(Error('设备授权已撤销'),{status:401});
+    const pending={text,seen:new Set(turns.flatMap(turn=>(turn.timeline||[]).map(item=>item.id)))};
+    entry.appToolsPending=pending;
+    this.emit('changed');
+    try{
+      await this.appTools.send(entry.id,text);
+      const deadline=Date.now()+9500;
+      do{
+        await this.readAppToolsHistory(entry);
+        if(pending.delivered)return {accepted:true};
+        await delay(180);
+      }while(!this.closed&&Date.now()<deadline);
+    }catch{/* The write outcome may be uncertain. Do not dispatch again. */}
+    const timer=setTimeout(()=>{
+      if(!this.closed&&this.entries.get(entry.id)===entry&&entry.appToolsPending===pending){delete entry.appToolsPending;this.emit('changed');}
+    },120000);
+    timer.unref();
+    throw Error('桌面尚未确认消息送达，请先核对会话，避免重复发送');
+  }
+
   async refreshQueue(entry,generation){
     if(!this.historyReader?.queuedMessages||entry.queueLoading)return;
     entry.queueLoading=true;const epoch=entry.queueEpoch||0;
@@ -275,6 +375,8 @@ export class DesktopBridge extends EventEmitter {
     return [...this.entries.values()].map(entry => {
       const state = entry.store.state;
       const liveTurn=entry.ready?activeTurn(state):null;
+      const appToolsAvailable=this.canUseAppTools(entry)&&!!entry.appToolsStatus;
+      const appToolsReady=appToolsAvailable&&entry.appToolsStatus==='idle'&&!entry.appToolsPending;
       const summary = summarizeThread(state);
       const turns = new Map((entry.history || []).map(turn => [turn.id, turn]));
       for (const turn of summary.turns) {
@@ -288,9 +390,10 @@ export class DesktopBridge extends EventEmitter {
           timeline: turn.timeline?.length ? turn.timeline : previous?.timeline || [],
           toolResults: turn.toolResults?.length ? turn.toolResults : previous?.toolResults || [] });
       }
-      return { id: entry.id, name: entry.name || '桌面聊天', ready: entry.ready,
-        queueSupported:!!this.historyReader?.queuedMessages,
-        queuedMessages:(entry.nativeQueue||[]).slice(0,100).map(message=>({id:message.id,text:String(message.prompt||message.text||message.context?.prompt||[...message.context?.fileAttachments||[],...message.context?.imageAttachments||[]].map(row=>row.label||row.filename||'附件').join('、')).slice(0,16000),status:message.submission?.status||'queued'})),
+      return { id: entry.id, name: entry.name || '桌面聊天', ready: entry.ready||appToolsReady,
+        ...(appToolsAvailable?{attachmentsSupported:false}:{}),
+        queueSupported:!appToolsAvailable&&!!this.historyReader?.queuedMessages,
+        queuedMessages:(appToolsAvailable?[]:(entry.nativeQueue||[])).slice(0,100).map(message=>({id:message.id,text:String(message.prompt||message.text||message.context?.prompt||[...message.context?.fileAttachments||[],...message.context?.imageAttachments||[]].map(row=>row.label||row.filename||'附件').join('、')).slice(0,16000),status:message.submission?.status||'queued'})),
         model: state?.latestThreadSettings?.model || state?.latestModel || entry.modelSettings?.model || '', reasoningEffort:state?.latestReasoningEffort || state?.latestThreadSettings?.effort || entry.modelSettings?.reasoningEffort || '',
         serviceTier:state?.latestThreadSettings?.serviceTier??'default',
         activity: entry.ready ? summary.activity : undefined,
@@ -300,7 +403,7 @@ export class DesktopBridge extends EventEmitter {
         // Use an empty string on the wire: Android JSONObject.optString coerces
         // JSON null into the nonempty string "null" (unlike JSON-java on the JVM).
         activeTurnId: liveTurn?.turnId ?? '',
-        revision: entry.store.revision, runtimeStatus: summary.runtimeStatus || 'unavailable',
+        revision: entry.store.revision, runtimeStatus: appToolsAvailable?entry.appToolsStatus:(summary.runtimeStatus || 'unavailable'),
         turns: [...turns.values()].slice(-50),
         questions: entry.ready ? pendingQuestions(state).map(q => ({ ...q, submitting: entry.consumed.has(JSON.stringify(['question', q.turnId, q.id])) })) : [],
         attentionRequests: entry.ready ? pendingAttention(state) : [],
@@ -328,7 +431,8 @@ export class DesktopBridge extends EventEmitter {
       try{return await operation;}finally{if(entry.queueOperation===operation)delete entry.queueOperation;}
     }
     const entry = this.entries.get(threadId);
-    if (!entry || !entry.ready || !this.client.initialized) throw new Error('聊天尚未就绪，请等待重新连接');
+    if(entry&&this.canUseAppTools(entry)&&entry.appToolsStatus)return this.sendWithAppTools(entry,command);
+    if (!entry || !entry.ready || !this.client?.initialized) throw new Error('聊天尚未就绪，请等待重新连接');
     if (!entry.writable) throw new Error('此聊天仅允许读取，请在电脑授权后操作');
     const state = entry.store.state;
     const active = activeTurn(state);
@@ -431,5 +535,5 @@ export class DesktopBridge extends EventEmitter {
     entry.modelSettings=await this.client.readModelSettings(threadId,entry.owner);
     return {models:this.modelCatalog,current:{model:entry.modelSettings?.model||'',effort:entry.modelSettings?.reasoningEffort||'',serviceTier:entry.store.state?.latestThreadSettings?.serviceTier??'default'}};
   }
-  close() { this.stopSidebarWatch?.(); this.closed = true; ++this.generation; clearTimeout(this.reconnectTimer); clearInterval(this.refreshTimer);for(const entry of this.entries.values())clearTimeout(entry.repairTimer);this.client?.close(); this.historyReader?.close();this.autoTitles?.close();if(this.backgroundHistoryReader!==this.historyReader)this.backgroundHistoryReader?.close(); }
+  close() { this.stopSidebarWatch?.(); this.closed = true; ++this.generation; clearTimeout(this.reconnectTimer); clearInterval(this.refreshTimer);clearInterval(this.appToolsTimer);for(const entry of this.entries.values())clearTimeout(entry.repairTimer);this.client?.close(); this.historyReader?.close();this.autoTitles?.close();if(this.backgroundHistoryReader!==this.historyReader)this.backgroundHistoryReader?.close(); }
 }

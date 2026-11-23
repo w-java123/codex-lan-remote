@@ -5,11 +5,21 @@ const toolTypes = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'dyn
 export function userText(input) {
   return (Array.isArray(input) ? input : []).filter(part => ['text','input_text','inputText'].includes(part?.type) && typeof part.text === 'string').map(part => part.text).join('\n');
 }
-export function turnInput(turn) {
-  const messages = turnTimeline(turn.items || []).filter(item => item.type === 'user').map(item => item.text).filter(Boolean);
+export function turnInput(turn, threadId) {
+  const messages = turnTimeline(turn.items || [], threadId).filter(item => item.type === 'user').map(item => item.text).filter(Boolean);
   return messages.length ? messages.join('\n\n') : userText(turn.params?.input);
 }
-export function turnTimeline(items = []) {
+const xmlEntities = { amp: '&', lt: '<', gt: '>', quot: String.fromCharCode(34), apos: String.fromCharCode(39) };
+// Native send_message_to_thread stores its text in a delegation envelope.
+function desktopDelegation(item, threadId) {
+  if (!threadId || item.type !== 'functionCallOutput' || item.namespace !== 'codex_app' ||
+      item.name !== 'send_message_to_thread' || typeof item.output !== 'string') return null;
+  const prefix = '<codex_delegation>\n  <source_thread_id>' + threadId + '</source_thread_id>\n  <input>';
+  const suffix = '</input>\n</codex_delegation>';
+  return item.output.startsWith(prefix) && item.output.endsWith(suffix)
+    ? item.output.slice(prefix.length, -suffix.length).replace(/&(amp|lt|gt|quot|apos);/g, (_, symbol) => xmlEntities[symbol]) : null;
+}
+export function turnTimeline(items = [], threadId) {
   // Desktop keeps accepted steering text in a separate item, with input rather
   // than content. A later canonical user item may replace the optimistic one.
   const canonicalUsers = items.filter(item => item?.type === 'userMessage');
@@ -26,6 +36,8 @@ export function turnTimeline(items = []) {
     ? value.filter(block => ['text','input_text','inputText'].includes(block?.type) && typeof block.text === 'string').map(block => block.text).join('\n') : '';
   return items.flatMap((item, index) => {
     if (!item || typeof item !== 'object') return [];
+    const delegated = desktopDelegation(item, threadId);
+    if (delegated !== null) return [{ id: item.id || 'delegation:'+index, type: 'user', text: delegated, delivery: 'desktop-delegation' }];
     if (item.type === 'userMessage') { const text=userText(item.content);return [{ id: item.id || `user:${index}`, ...(item.clientId?{clientMessageId:item.clientId}:{}), type: 'user', text, files:messageFiles(text,item.content) }]; }
     if (item.type === 'steeringUserMessage') {
       const replaced = canonicalUsers.some(user =>

@@ -134,9 +134,9 @@ export class HistoryReader {
     const value = await this.request('thread/turns/list', { threadId, limit, sortDirection: 'desc', itemsView: 'full' });
     return (value.data || []).reverse().map(turn => ({
       id: turn.id, status: turn.status, startedAtMs: turn.startedAt ? turn.startedAt * 1000 : undefined,failureReason:taskFailure(turn),
-      input: turnInput(turn),
+      input: turnInput(turn, threadId),
       agentMessages: (turn.items || []).filter(item => item.type === 'agentMessage').map(item => item.text),
-      timeline: turnTimeline(turn.items),
+      timeline: turnTimeline(turn.items, threadId),
       itemTypes: (turn.items || []).map(item => item.type),
       toolResults: (turn.items || []).filter(item => ['commandExecution', 'fileChange'].includes(item.type)).map(item => ({ id: item.id, type: item.type, status: item.status, exitCode: item.exitCode })),
     }));
