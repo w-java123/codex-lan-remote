@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { messageInput } from './message-input.mjs';
 
 export class DesktopBridge extends EventEmitter {
-  constructor(threads, { clientFactory = options => new DesktopIpcClient(options), historyReader,backgroundHistoryReader=historyReader, allowSelectedChats = false,chatCreator,autoTitles,openDesktopChat,appTools } = {}) {
+  constructor(threads, { clientFactory = options => new DesktopIpcClient(options), historyReader,backgroundHistoryReader=historyReader, allowSelectedChats = false,chatCreator,autoTitles,openDesktopChat,appTools,phoneModels={},savePhoneModels=async()=>{} } = {}) {
     super();
     this.entries = new Map(threads.map(thread => [thread.id, { ...thread, writable: true, history: [], store: new ThreadState(), ready: false, consumed: new Set() }]));
     this.historyReader = historyReader;
@@ -18,6 +18,8 @@ export class DesktopBridge extends EventEmitter {
     this.autoTitles=autoTitles;
     this.openDesktopChat = openDesktopChat;
     this.appTools = appTools;
+    this.phoneModels = new Map(Object.entries(phoneModels));
+    this.savePhoneModels = savePhoneModels;
     this.catalogRows = threads;
     this.sidebarRevision = 0;
     if (historyReader) this.stopSidebarWatch = watchDesktopSidebar(() => {
@@ -33,6 +35,8 @@ export class DesktopBridge extends EventEmitter {
         if (!entry.ready) void this.hydrate(entry, this.generation);
         else void this.refreshQueue(entry,this.generation);
       }
+      const selected=this.entries.get(this.desktopSelection?.id);
+      if(selected&&this.canUseAppTools(selected)&&selected.appToolsStatus)void this.refreshQueue(selected,this.generation);
     }, 10000);
     this.refreshTimer.unref();
     if(appTools){
@@ -282,6 +286,7 @@ export class DesktopBridge extends EventEmitter {
       const changed=entry.appToolsStatus!==status;
       entry.appToolsStatus=status;
       if(status==='idle'&&!entry.appToolsPending)this.recordSelectionReady(entry);
+      if(status&&entry.nativeQueue===undefined)void this.refreshQueue(entry,this.generation);
       if(changed)this.emit('changed');
       return !!status;
     })();
@@ -306,6 +311,7 @@ export class DesktopBridge extends EventEmitter {
         delete entry.appToolsPending;
         this.emit('changed');
       }else if(changed)this.emit('changed');
+      if(entry.appToolsStatus==='idle')this.maybeAutoTitle(entry,this.generation,history);
       return turns;
     });
     entry.appToolsHistory=reading;
@@ -323,11 +329,13 @@ export class DesktopBridge extends EventEmitter {
     const status=await this.appTools.status(entry.id);
     if(!this.canUseAppTools(entry)||status!=='idle'||entry.appToolsPending)throw Error('桌面会话尚不可写，请刷新');
     if(command.authorized?.()===false)throw Object.assign(Error('设备授权已撤销'),{status:401});
+    const choice=this.phoneModels.get(entry.id);
+    if(choice&&!this.appTools.modelSelectionSupported)throw Error('当前桌面连接无法应用手机选择的模型');
     const pending={text,seen:new Set(turns.flatMap(turn=>(turn.timeline||[]).map(item=>item.id)))};
     entry.appToolsPending=pending;
     this.emit('changed');
     try{
-      await this.appTools.send(entry.id,text);
+      await this.appTools.send(entry.id,text,choice&&{model:choice.model,thinking:choice.effort});
       const deadline=Date.now()+9500;
       do{
         await this.readAppToolsHistory(entry);
@@ -351,13 +359,14 @@ export class DesktopBridge extends EventEmitter {
     }catch{/* A temporary read failure must not erase the last observed queue. */}
     finally{entry.queueLoading=false;}
   }
-  maybeAutoTitle(entry,generation){
-    if(!entry.ready||!this.autoTitles?.wants(entry.id))return;
-    const turns=summarizeThread(entry.store.state).turns;
+  maybeAutoTitle(entry,generation,persistedTurns){
+    if((persistedTurns?!this.canUseAppTools(entry):!entry.ready)||!this.autoTitles?.wants(entry.id))return;
+    const turns=persistedTurns??summarizeThread(entry.store.state).turns;
     if(turns.at(-1)?.status!=='completed')return;
     const prompt=turns.find(turn=>turn.input)?.input;if(!prompt)return;
-    void this.autoTitles.generate({threadId:entry.id,cwd:entry.store.state?.cwd,prompt,
-      canApply:()=>!this.closed&&generation===this.generation&&this.entries.get(entry.id)===entry}).then(title=>{
+    const cwd=this.fileRoot(entry.id);if(persistedTurns&&!cwd)return;
+    void this.autoTitles.generate({threadId:entry.id,cwd,prompt,
+      canApply:()=>persistedTurns?this.canUseAppTools(entry):!this.closed&&generation===this.generation&&this.entries.get(entry.id)===entry}).then(title=>{
       if(title&&!this.closed){entry.name=title;this.catalogAt=0;this.emit('changed');}
     }).catch(()=>{});
   }
@@ -370,13 +379,17 @@ export class DesktopBridge extends EventEmitter {
     this.reconnectTimer = setTimeout(() => { this.reconnectTimer = null; void this.connect(); }, 3000);
     this.reconnectTimer.unref();
   }
-  fileRoot(threadId) { return this.entries.get(threadId)?.store.state?.cwd; }
+  fileRoot(threadId) {
+    const entry=this.entries.get(threadId);
+    return entry?.store.state?.cwd||(entry&&this.historyReader?.threadDirectories?.get(threadId));
+  }
   snapshot() {
     return [...this.entries.values()].map(entry => {
       const state = entry.store.state;
       const liveTurn=entry.ready?activeTurn(state):null;
       const appToolsAvailable=this.canUseAppTools(entry)&&!!entry.appToolsStatus;
       const appToolsReady=appToolsAvailable&&entry.appToolsStatus==='idle'&&!entry.appToolsPending;
+      const phoneModel=appToolsAvailable?this.phoneModels.get(entry.id):undefined;
       const summary = summarizeThread(state);
       const turns = new Map((entry.history || []).map(turn => [turn.id, turn]));
       for (const turn of summary.turns) {
@@ -391,10 +404,10 @@ export class DesktopBridge extends EventEmitter {
           toolResults: turn.toolResults?.length ? turn.toolResults : previous?.toolResults || [] });
       }
       return { id: entry.id, name: entry.name || '桌面聊天', ready: entry.ready||appToolsReady,
-        ...(appToolsAvailable?{attachmentsSupported:false,modelSelectionSupported:false}:{}),
+        ...(appToolsAvailable?{attachmentsSupported:false,modelSelectionSupported:this.canChooseAppToolsModel(entry)}:{}),
         queueSupported:!appToolsAvailable&&!!this.historyReader?.queuedMessages,
-        queuedMessages:(appToolsAvailable?[]:(entry.nativeQueue||[])).slice(0,100).map(message=>({id:message.id,text:String(message.prompt||message.text||message.context?.prompt||[...message.context?.fileAttachments||[],...message.context?.imageAttachments||[]].map(row=>row.label||row.filename||'附件').join('、')).slice(0,16000),status:message.submission?.status||'queued'})),
-        model: state?.latestThreadSettings?.model || state?.latestModel || entry.modelSettings?.model || '', reasoningEffort:state?.latestReasoningEffort || state?.latestThreadSettings?.effort || entry.modelSettings?.reasoningEffort || '',
+        queuedMessages:(entry.nativeQueue||[]).slice(0,100).map(message=>({id:message.id,text:String(message.prompt||message.text||message.context?.prompt||[...message.context?.fileAttachments||[],...message.context?.imageAttachments||[]].map(row=>row.label||row.filename||'附件').join('、')).slice(0,16000),status:message.submission?.status||'queued'})),
+        model: phoneModel?.model || state?.latestThreadSettings?.model || state?.latestModel || entry.modelSettings?.model || '', reasoningEffort:phoneModel?.effort || state?.latestReasoningEffort || state?.latestThreadSettings?.effort || entry.modelSettings?.reasoningEffort || '',
         serviceTier:state?.latestThreadSettings?.serviceTier??'default',
         activity: entry.ready ? summary.activity : undefined,
         writable: !!entry.writable, historyReady: !!entry.historyReady,
@@ -431,7 +444,10 @@ export class DesktopBridge extends EventEmitter {
       try{return await operation;}finally{if(entry.queueOperation===operation)delete entry.queueOperation;}
     }
     const entry = this.entries.get(threadId);
-    if(entry&&this.canUseAppTools(entry)&&entry.appToolsStatus)return this.sendWithAppTools(entry,command);
+    if(entry&&this.canUseAppTools(entry)&&entry.appToolsStatus){
+      if(command.op==='model')return this.chooseAppToolsModel(entry,command);
+      return this.sendWithAppTools(entry,command);
+    }
     if (!entry || !entry.ready || !this.client?.initialized) throw new Error('聊天尚未就绪，请等待重新连接');
     if (!entry.writable) throw new Error('此聊天仅允许读取，请在电脑授权后操作');
     const state = entry.store.state;
@@ -452,9 +468,7 @@ export class DesktopBridge extends EventEmitter {
       await this.client.compactThread(threadId,entry.owner);
     } else if (command.op === 'model') {
       const {models}=await this.modelOptions(threadId);
-      const model=models.find(row=>row.model===command.model);
-      if(!model || !model.efforts.includes(command.effort))throw Error('模型或思考强度不在电脑可用列表中，请刷新后选择');
-      if(command.serviceTier!==undefined && command.serviceTier!=='default' && !(model.serviceTiers||[]).some(tier=>tier.id===command.serviceTier&&tier.id==='priority'))throw Error('此模型未提供所选速度');
+      this.validateModelChoice(models,command);
       const result=await this.client.updateModelSettings(threadId,command.model,command.effort,{ownerId:entry.owner,serviceTier:command.serviceTier});
       if(!result?.applied)throw Error('电脑未应用模型设置，请刷新重试');
       entry.modelSettings=await this.client.readModelSettings(threadId,entry.owner);
@@ -519,19 +533,57 @@ export class DesktopBridge extends EventEmitter {
     return { accepted: true };
   }
   async skills(threadId){
-    const entry=this.entries.get(threadId);if(!entry?.ready||!entry.writable)throw Error('聊天未授权写入或尚未就绪');
+    const entry=this.entries.get(threadId);
+    if(!entry?.writable||(!entry.ready&&!(this.canUseAppTools(entry)&&entry.appToolsStatus)))throw Error('聊天未授权写入或尚未就绪');
     if(!this.historyReader?.skills)throw Error('请更新电脑插件以读取技能');
-    const rows=await this.historyReader.skills(entry.store.state.cwd),counts=new Map();
+    let cwd=this.fileRoot(threadId);
+    if(!cwd&&!entry.ready){
+      await this.catalog();
+      cwd=this.fileRoot(threadId);
+    }
+    if(!cwd&&!entry.ready)throw Error('当前会话工作目录未就绪');
+    const rows=await this.historyReader.skills(cwd),counts=new Map();
     for(const row of rows)counts.set(row.name,(counts.get(row.name)||0)+1);
     return {skills:rows.filter(row=>counts.get(row.name)===1&&/^[\w.-]+$/.test(row.name)).map(row=>({name:row.name,description:String(row.shortDescription||row.description||'').slice(0,240)}))};
   }
+  canChooseAppToolsModel(entry){
+    return this.canUseAppTools(entry)&&['idle','active'].includes(entry.appToolsStatus)&&
+      !!this.appTools.modelSelectionSupported&&!!this.historyReader?.models;
+  }
+  validateModelChoice(models,{model,effort,serviceTier}){
+    const row=models.find(item=>item.model===model);
+    if(!row||!row.efforts.includes(effort))throw Error('模型或思考强度不在电脑可用列表中，请刷新后选择');
+    if(serviceTier!==undefined&&serviceTier!=='default'&&!(row.serviceTiers||[]).some(tier=>tier.id==='priority'&&tier.id===serviceTier))throw Error('此模型未提供所选速度');
+  }
+  async chooseAppToolsModel(entry,command){
+    const {models}=await this.modelOptions(entry.id);
+    this.validateModelChoice(models,command);
+    const save=(this.phoneModelWrite||Promise.resolve()).catch(()=>{}).then(async()=>{
+      if(!this.canChooseAppToolsModel(entry))throw Error('桌面会话已变化，请刷新模型选项');
+      if(command.authorized?.()===false)throw Object.assign(Error('设备授权已撤销'),{status:401});
+      const next=new Map(this.phoneModels);
+      next.set(entry.id,{model:command.model,effort:command.effort,serviceTier:'default'});
+      await this.savePhoneModels(Object.fromEntries(next));
+      this.phoneModels=next;
+      this.emit('changed');
+    });
+    this.phoneModelWrite=save;
+    await save;
+    return {accepted:true};
+  }
   async modelOptions(threadId){
     const entry=this.entries.get(threadId);
-    if(entry&&this.canUseAppTools(entry)&&entry.appToolsStatus)throw Error('请在电脑端选择模型');
-    if(!entry?.ready)throw Error('桌面聊天尚未就绪');
+    const usingAppTools=entry&&this.canUseAppTools(entry)&&entry.appToolsStatus;
+    if(usingAppTools?!this.canChooseAppToolsModel(entry):!entry?.ready)throw Error('桌面聊天的模型设置尚不可用');
     if(!this.modelCatalog || Date.now()-this.modelCatalogAt>60000){
       if(!this.historyReader?.models)throw Error('当前桌面版本不支持模型列表');
       this.modelCatalog=await this.historyReader.models();this.modelCatalogAt=Date.now();
+    }
+    if(usingAppTools){
+      // The desktop tool supports per-message overrides; service tier is set by the desktop itself.
+      const models=this.modelCatalog.map(row=>({...row,serviceTiers:[]}));
+      const current=this.phoneModels.get(threadId)||{model:'',effort:'',serviceTier:'default'};
+      return {models,current};
     }
     entry.modelSettings=await this.client.readModelSettings(threadId,entry.owner);
     return {models:this.modelCatalog,current:{model:entry.modelSettings?.model||'',effort:entry.modelSettings?.reasoningEffort||'',serviceTier:entry.store.state?.latestThreadSettings?.serviceTier??'default'}};

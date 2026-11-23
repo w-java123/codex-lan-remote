@@ -1,4 +1,4 @@
-param([string]$DataDirectory, [switch]$Start, [switch]$StartOnly, [switch]$Highest)
+param([string]$DataDirectory, [switch]$Start, [switch]$StartOnly, [switch]$StopOnly, [switch]$Highest)
 $ErrorActionPreference = 'Stop'
 if (-not $DataDirectory) { $DataDirectory = Join-Path $env:LOCALAPPDATA 'CodexLAN' }
 $taskPlugin = Split-Path -Parent $PSScriptRoot
@@ -47,6 +47,32 @@ if ($taskOldName -ne $taskName) {
 }
 $taskPrior = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($taskPrior -and $taskPrior.Description -ne $taskMarker) { throw '同名后台任务不属于本插件，未修改' }
+function Stop-CodexLanBackground {
+    # The old runtime holds the manager lock until it finishes stopping its gateway.
+    param($taskPrevious)
+    $taskEndpoint = $null
+    $taskEndpointPath = Join-Path $taskFullRoot 'manager.local.json'
+    $taskWasRunning = ($taskPrevious -and $taskPrevious.State -eq 'Running') -or (Test-Path -LiteralPath $taskEndpointPath)
+    if (Test-Path -LiteralPath $taskEndpointPath) {
+        $taskEndpoint = Get-Content -LiteralPath $taskEndpointPath -Raw | ConvertFrom-Json
+        if ($taskEndpoint.origin -notmatch '^http://127\.0\.0\.1:\d+$') { throw '本机管理地址无效' }
+        try {
+            Invoke-RestMethod ($taskEndpoint.origin + '/api/shutdown') -Method Post -Headers @{Authorization=('Bearer ' + $taskEndpoint.token)} -ContentType 'application/json' -Body '{}' -TimeoutSec 3 | Out-Null
+        } catch {
+            if (Get-Process -Id $taskEndpoint.pid -ErrorAction SilentlyContinue) { throw }
+        }
+    }
+    for ($taskAttempt = 0; $taskAttempt -lt 60; $taskAttempt++) {
+        $taskRunning = $taskPrevious -and (Get-ScheduledTask -TaskName $taskPrevious.TaskName).State -eq 'Running'
+        $taskManagerRunning = $taskEndpoint -and (Test-Path -LiteralPath $taskEndpointPath) -and (Get-Process -Id $taskEndpoint.pid -ErrorAction SilentlyContinue)
+        if (-not ($taskRunning -or $taskManagerRunning)) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    if ($taskRunning -or $taskManagerRunning) { throw '旧后台仍在退出，未更新自动恢复任务' }
+    return [bool]$taskWasRunning
+}
+$taskPrevious = if ($taskPrior) { $taskPrior } else { $taskOld }
+if ($StopOnly) { return Stop-CodexLanBackground $taskPrevious }
 if ($StartOnly) {
     if (-not $taskPrior) { throw '手机连接自动恢复任务尚未注册' }
     Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
@@ -66,31 +92,11 @@ $taskEntry = Join-Path $taskPlugin 'desktop\background.mjs'
 if (-not (Test-Path -LiteralPath $taskRuntime -PathType Leaf) -or -not (Test-Path -LiteralPath $taskEntry -PathType Leaf)) {
     throw '后台运行时或入口缺失，请重新安装完整插件包'
 }
-$taskPrevious = if ($taskPrior) { $taskPrior } else { $taskOld }
 $taskElevated = $Highest -or ($taskPrevious -and [string]$taskPrevious.Principal.RunLevel -eq 'Highest')
 $taskLevel = if ($taskElevated) { 'Highest' } else { 'Limited' }
 if ($Highest -and -not ([Security.Principal.WindowsPrincipal]::new($taskIdentity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw '配置管理员后台需先允许 Windows 管理员授权' }
 $taskAction = New-ScheduledTaskAction -Execute $taskRuntime -Argument ('"' + $taskEntry + '" --data "' + $taskFullRoot + '"') -WorkingDirectory $taskPlugin
-if ($Start) {
-    # The old runtime holds the manager lock until it finishes stopping its gateway.
-    $taskEndpointPath = Join-Path $taskFullRoot 'manager.local.json'
-    if (Test-Path -LiteralPath $taskEndpointPath) {
-        $taskEndpoint = Get-Content -LiteralPath $taskEndpointPath -Raw | ConvertFrom-Json
-        if ($taskEndpoint.origin -notmatch '^http://127\.0\.0\.1:\d+$') { throw '本机管理地址无效' }
-        try {
-            Invoke-RestMethod ($taskEndpoint.origin + '/api/shutdown') -Method Post -Headers @{Authorization=('Bearer ' + $taskEndpoint.token)} -ContentType 'application/json' -Body '{}' -TimeoutSec 3 | Out-Null
-        } catch {
-            if (Get-Process -Id $taskEndpoint.pid -ErrorAction SilentlyContinue) { throw }
-        }
-    }
-    for ($taskAttempt = 0; $taskAttempt -lt 60; $taskAttempt++) {
-        $taskRunning = $taskPrevious -and (Get-ScheduledTask -TaskName $taskPrevious.TaskName).State -eq 'Running'
-        $taskManagerRunning = $taskEndpoint -and (Test-Path -LiteralPath $taskEndpointPath) -and (Get-Process -Id $taskEndpoint.pid -ErrorAction SilentlyContinue)
-        if (-not ($taskRunning -or $taskManagerRunning)) { break }
-        Start-Sleep -Milliseconds 250
-    }
-    if ($taskRunning -or $taskManagerRunning) { throw '旧后台仍在退出，未更新自动恢复任务' }
-}
+if ($Start) { $null = Stop-CodexLanBackground $taskPrevious }
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel $taskLevel
 $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
 $taskTrigger.Delay = 'PT15S'

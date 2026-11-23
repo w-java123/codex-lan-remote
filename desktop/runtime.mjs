@@ -52,8 +52,11 @@ export class GatewayRuntime {
     const historyReader = config.codexBinary ? new HistoryReader(config.codexBinary) : undefined;
     const autoTitlePath=join(this.root,'auto-titles.local.json');
     const autoTitles=config.codexBinary?new AutoTitles(config.codexBinary,{entries:await readJson(autoTitlePath,{}),save:entries=>atomicJson(autoTitlePath,entries)}):undefined;
+    const appTools = process.platform === 'win32' && historyReader ? new DesktopAppTools() : undefined;
+    const phoneModelsPath = join(this.root, 'phone-models.local.json');
+    const phoneModels = appTools ? await readJson(phoneModelsPath, {}).catch(() => ({})) : {};
     const bridge = new DesktopBridge(config.threads, { historyReader,backgroundHistoryReader:config.codexBinary?new HistoryReader(config.codexBinary):undefined, allowSelectedChats: config.allowSelectedChats,chatCreator:config.codexBinary?new ChatCreator(config.codexBinary):undefined,autoTitles, openDesktopChat: launchDesktopThread,
-      appTools: process.platform === 'win32' && historyReader ? new DesktopAppTools() : undefined });
+      appTools, phoneModels: phoneModels || {}, savePhoneModels: value => atomicJson(phoneModelsPath, value) });
     const connectionAddresses={ primary:`https://${config.host}:${config.port}`, ...(config.lanHost ? {lan:`https://${config.lanHost}:${config.port}`} : {}) };
     const uploadIndex=join(this.root,'uploads.local.json');
     const uploads=new Uploads(join(process.env.CODEX_HOME||join(homedir(),'.codex'),'attachments'),{entries:await readJson(uploadIndex,{}),save:entries=>atomicJson(uploadIndex,entries)});

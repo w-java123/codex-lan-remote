@@ -23,7 +23,7 @@ $installer = [IO.File]::ReadAllText("$root/scripts/install-desktop-plugin.ps1")
 $anchor = '& (Join-Path $taskInstalled.installedPath ''scripts\configure-desktop-autostart.ps1'')'
 $copy = 'Copy-Item -LiteralPath (Join-Path $taskInstalled.installedPath ''scripts\open-phone-settings.ps1'') -Destination (Join-Path $DataDirectory ''open-settings.ps1'') -Force'
 if (!$installer.Contains($anchor)) { throw 'Installer hook missing' }
-[IO.File]::WriteAllText("$stage/install-desktop-plugin.ps1", $installer.Replace($anchor, $copy + [Environment]::NewLine + $anchor), [Text.UTF8Encoding]::new($true))
+[IO.File]::WriteAllText("$stage/install-desktop-plugin.ps1", $installer.Replace($anchor, $copy + [Environment]::NewLine + '    ' + $anchor), [Text.UTF8Encoding]::new($true))
 foreach($file in Get-ChildItem $stage -Recurse -Force -File) {
     if($file.FullName.Substring($stage.Length) -match '(?i)[\\/](secrets|\.local|shared_prefs|databases)[\\/]|\.local\.(json|md)$|\.(keystore|jks|pfx|p12|pem|key|crt)$') { throw 'Private file in payload' }
 }

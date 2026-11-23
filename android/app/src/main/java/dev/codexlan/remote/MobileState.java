@@ -22,8 +22,8 @@ final class MobileState {
                     // Stored content fills the cache; the latest live status always wins.
                     JSONArray liveTurns=live.optJSONArray("turns");if(live.optBoolean("ready")&&liveTurns!=null)for(int j=0;j<liveTurns.length();j++){JSONObject current=liveTurns.getJSONObject(j),cached=turns.get(current.optString("id"));if(cached!=null){cached=copyFields(cached);for(String field:new String[]{"status","failureReason","startedAtMs"})if(current.has(field))cached.put(field,current.get(field));turns.put(current.optString("id"),cached);}}
                     while(turns.size()>50)turns.remove(turns.keySet().iterator().next());row=copyFields(history).put("turns",new JSONArray(turns.values()));
-                    for(String field:new String[]{"modelSelectionSupported","runtimeStatus"})if(live.has(field))row.put(field,live.get(field));
-                    if(live.optBoolean("ready"))for(String field:new String[]{"ready","writable","activeTurnId","approvals","questions","queueSupported","queuedMessages","metadataOnly","model","reasoningEffort","serviceTier","revision","activity"})if(live.has(field))row.put(field,live.get(field));
+                    for(String field:new String[]{"attachmentsSupported","modelSelectionSupported","runtimeStatus","queuedMessages","queueSupported"})if(live.has(field))row.put(field,live.get(field));
+                    if(live.optBoolean("ready"))for(String field:new String[]{"ready","writable","activeTurnId","approvals","questions","metadataOnly","model","reasoningEffort","serviceTier","revision","activity"})if(live.has(field))row.put(field,live.get(field));
                 }
                 row.put("historyUpdatedAt",history.optLong("historyUpdatedAt"));}
             after.put(row);

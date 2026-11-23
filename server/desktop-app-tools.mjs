@@ -40,6 +40,10 @@ function payload(result){
 export class DesktopAppTools {
   #endpoint;
   #lookup;
+  get modelSelectionSupported(){
+    const props=this.#endpoint?.send;
+    return props?.model?.type==='string'&&props?.thinking?.type==='string';
+  }
   async #discover(){
     const pipes=await readdir(pipeRoot);
     if(pipes.includes('codex-ipc'))throw Error('桌面旧版控制入口仍存在');
@@ -76,8 +80,8 @@ export class DesktopAppTools {
     if(thread?.id!==threadId&&thread?.threadId!==threadId)throw Error('读取回执与目标会话不符');
     return thread.status?.type??thread.status;
   }
-  async send(threadId,text){
-    const ack=await this.#call(threadId,'send_message_to_thread',{hostId:'local',prompt:text});
+  async send(threadId,text,settings){
+    const ack=await this.#call(threadId,'send_message_to_thread',{hostId:'local',prompt:text,...settings});
     if(ack?.threadId!==threadId)throw Error('发送回执与目标会话不符');
   }
 }

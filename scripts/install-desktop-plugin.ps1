@@ -48,12 +48,22 @@ if (-not $taskPriorSource -or $taskSourceChanged) {
         throw '注册本地插件目录失败，已尝试恢复旧来源'
     }
 }
-$taskInstalledJson = & $CodexPath plugin add codex-lan-desktop@codex-lan-local --json
-if ($LASTEXITCODE -ne 0) { throw '安装插件失败' }
-$taskInstalledJson | Write-Output
-$taskInstalled = $taskInstalledJson | ConvertFrom-Json
-& (Join-Path $taskInstalled.installedPath 'scripts\prepare-desktop-native.ps1') -PluginDirectory $taskInstalled.installedPath
-& (Join-Path $taskInstalled.installedPath 'scripts\install-settings-shortcuts.ps1') -PluginDirectory $taskInstalled.installedPath -DataDirectory $DataDirectory
-& (Join-Path $taskInstalled.installedPath 'scripts\configure-desktop-autostart.ps1') -DataDirectory $DataDirectory -Start
+$taskAutostart = Join-Path $taskBundle 'plugins\codex-lan-desktop\scripts\configure-desktop-autostart.ps1'
+# A scheduled Node process holds the old cache directory open on Windows.
+$taskStopped = & $taskAutostart -DataDirectory $DataDirectory -StopOnly
+try {
+    $taskInstalledJson = & $CodexPath plugin add codex-lan-desktop@codex-lan-local --json
+    if ($LASTEXITCODE -ne 0) { throw '安装插件失败' }
+    $taskInstalledJson | Write-Output
+    $taskInstalled = $taskInstalledJson | ConvertFrom-Json
+    & (Join-Path $taskInstalled.installedPath 'scripts\prepare-desktop-native.ps1') -PluginDirectory $taskInstalled.installedPath
+    & (Join-Path $taskInstalled.installedPath 'scripts\install-settings-shortcuts.ps1') -PluginDirectory $taskInstalled.installedPath -DataDirectory $DataDirectory
+    & (Join-Path $taskInstalled.installedPath 'scripts\configure-desktop-autostart.ps1') -DataDirectory $DataDirectory -Start
+} catch {
+    if ($taskStopped) {
+        try { & $taskAutostart -DataDirectory $DataDirectory -StartOnly } catch { }
+    }
+    throw
+}
 Write-Output '手机连接插件已安装。当前聊天可能需要刷新插件或在新的聊天中加载工具；无需重装 Android App。'
 Write-Output ('插件数据目录：' + $DataDirectory)
