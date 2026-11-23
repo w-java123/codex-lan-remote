@@ -351,8 +351,9 @@ export class DesktopBridge extends EventEmitter {
   }
 
   canUseNativeQueue(entry){
-    return this.canUseAppTools(entry)&&['idle','active'].includes(entry.appToolsStatus)&&
-      this.historyReader?.hasNativeQueue?.(entry.id)===true;
+    const appTools=this.canUseAppTools(entry)&&['idle','active'].includes(entry.appToolsStatus);
+    const sharedOwner=this.client?.initialized&&this.client.sharedOwner&&entry.ready&&entry.writable;
+    return (appTools||sharedOwner)&&this.historyReader?.hasNativeQueue?.(entry.id)===true;
   }
 
   async commandNativeQueue(entry,command){
@@ -435,7 +436,7 @@ export class DesktopBridge extends EventEmitter {
       const appToolsAvailable=this.canUseAppTools(entry)&&!!entry.appToolsStatus;
       const appToolsReady=appToolsAvailable&&entry.appToolsStatus==='idle'&&!entry.appToolsPending;
       const phoneModel=appToolsAvailable?this.phoneModels.get(entry.id):undefined;
-      const nativeQueueSupported=appToolsAvailable&&this.canUseNativeQueue(entry);
+      const nativeQueueSupported=this.canUseNativeQueue(entry);
       const summary = summarizeThread(state);
       const turns = new Map((entry.history || []).map(turn => [turn.id, turn]));
       for (const turn of summary.turns) {
@@ -451,8 +452,8 @@ export class DesktopBridge extends EventEmitter {
       }
       return { id: entry.id, name: entry.name || '桌面聊天', ready: entry.ready||appToolsReady,
         ...(appToolsAvailable?{attachmentsSupported:nativeQueueSupported,nativeQueueSupported,modelSelectionSupported:this.canChooseAppToolsModel(entry)}:{}),
-        queueSupported:appToolsAvailable?nativeQueueSupported:!!this.historyReader?.queuedMessages,
-        queuedMessages:(entry.nativeQueue||[]).slice(0,100).map(message=>({id:message.id,text:String(message.prompt||message.text||message.context?.prompt||[...message.context?.fileAttachments||[],...message.context?.imageAttachments||[]].map(row=>row.label||row.filename||'附件').join('、')).slice(0,16000),status:message.submission?.status||'queued',...(appToolsAvailable?{removable:nativeQueueSupported&&message.serverQueue===true}:{})})),
+        queueSupported:appToolsAvailable||this.client?.sharedOwner?nativeQueueSupported:!!this.historyReader?.queuedMessages,
+        queuedMessages:(entry.nativeQueue||[]).slice(0,100).map(message=>({id:message.id,text:String(message.prompt||message.text||message.context?.prompt||[...message.context?.fileAttachments||[],...message.context?.imageAttachments||[]].map(row=>row.label||row.filename||'附件').join('、')).slice(0,16000),status:message.submission?.status||'queued',...(appToolsAvailable||this.client?.sharedOwner?{removable:nativeQueueSupported&&message.serverQueue===true}:{})})),
         model: phoneModel?.model || state?.latestThreadSettings?.model || state?.latestModel || entry.modelSettings?.model || '', reasoningEffort:phoneModel?.effort || state?.latestReasoningEffort || state?.latestThreadSettings?.effort || entry.modelSettings?.reasoningEffort || '',
         serviceTier:state?.latestThreadSettings?.serviceTier??'default',
         activity: entry.ready ? summary.activity : undefined,
@@ -473,10 +474,12 @@ export class DesktopBridge extends EventEmitter {
           const id = request.id ?? request.requestId;
           const params = request.params || {};
           if(params.turnId&&params.turnId!==liveTurn.turnId)return [];
-          if(params.itemId&&!(liveTurn.items||[]).some(item=>item.id===params.itemId))return [];
+          const nativeApproval=this.client?.sharedOwner&&params.turnId===liveTurn.turnId&&
+            ['item/commandExecution/requestApproval','item/fileChange/requestApproval'].includes(type);
+          if(params.itemId&&!(liveTurn.items||[]).some(item=>item.id===params.itemId)&&!nativeApproval)return [];
           const items = getTurns(state).flatMap(turn => turn.items || []);
           const item = items.find(item => item.id === params.itemId);
-          return [{ id, kind, turnId: getTurns(state).at(-1)?.turnId, decisions: (params.availableDecisions || ['accept', 'cancel']).filter(value => ['accept', 'decline', 'cancel'].includes(value)),
+          return [{ id, kind, turnId: liveTurn.turnId, decisions: (params.availableDecisions || (nativeApproval ? ['accept', 'decline', 'cancel'] : ['accept', 'cancel'])).filter(value => ['accept', 'decline', 'cancel'].includes(value)),
             command: params.command ?? item?.command ?? null, cwd: params.cwd ?? null,
             reason: params.reason ?? null, changes: kind === 'file' ? (item?.changes || []) : [],
             submitting: entry.consumed.has(JSON.stringify([getTurns(state).at(-1)?.turnId, id])) }];
@@ -500,6 +503,8 @@ export class DesktopBridge extends EventEmitter {
     }
     if (!entry || !entry.ready || !this.client?.initialized) throw new Error('聊天尚未就绪，请等待重新连接');
     if (!entry.writable) throw new Error('此聊天仅允许读取，请在电脑授权后操作');
+    if(this.client.sharedOwner&&['queue','queue-remove'].includes(command.op))return this.commandNativeQueue(entry,command);
+    if(command.authorized?.()===false)throw Object.assign(Error('设备授权已撤销'),{status:401});
     const state = entry.store.state;
     const active = activeTurn(state);
     if(['start','steer','queue'].includes(command.op)){
@@ -543,10 +548,11 @@ export class DesktopBridge extends EventEmitter {
       await this.client.removeQueuedMessage(threadId,command.messageId,entry.owner);entry.nativeQueue=(entry.nativeQueue||[]).filter(row=>row.id!==command.messageId);this.emit('changed');
     } else if (command.op === 'start') {
       if (active) throw new Error('聊天正在执行，请等待完成或使用追加指令');
-      await this.client.startTurn(threadId, command.text, { ownerId: entry.owner,cwd:state.cwd,attachments:command.attachments,skills:command.skills });
+      const result=await this.client.startTurn(threadId, command.text, { ownerId: entry.owner,cwd:state.cwd,attachments:command.attachments,skills:command.skills });
+      if(this.client.sharedOwner&&result?.queued){void this.refreshQueue(entry,this.generation);return result;}
     } else if (command.op === 'steer') {
       if (!active) throw new Error('没有正在执行的任务');
-      await this.client.steerTurn(threadId, command.text, { ownerId: entry.owner, cwd: state.cwd,attachments:command.attachments,skills:command.skills });
+      await this.client.steerTurn(threadId, command.text, { ownerId: entry.owner, expectedTurnId:active.turnId, cwd: state.cwd,attachments:command.attachments,skills:command.skills });
     } else if (command.op === 'interrupt') {
       if (!active || command.turnId !== active.turnId) throw new Error('任务已变化，请刷新后重试');
       await this.client.interruptTurn(threadId, active.turnId, entry.owner);
@@ -561,7 +567,7 @@ export class DesktopBridge extends EventEmitter {
       if (request.kind === 'native') await this.client.replyUserInput(threadId, request.id, answers, entry.owner);
       else {
         const replies = request.questions.map(q => ({ questionItemId: q.id, question: q.title, answer: answers[q.id].answers[0] }));
-        await this.client.steerTurn(threadId, '<send_user_message_question_reply>\n' + JSON.stringify(replies) + '\n</send_user_message_question_reply>', { ownerId: entry.owner, cwd: state.cwd });
+        await this.client.steerTurn(threadId, '<send_user_message_question_reply>\n' + JSON.stringify(replies) + '\n</send_user_message_question_reply>', { ownerId: entry.owner, expectedTurnId: request.turnId, cwd: state.cwd });
       }
       this.emit('changed');
     } else if (command.op === 'approve') {
@@ -570,7 +576,8 @@ export class DesktopBridge extends EventEmitter {
       if (!request) throw new Error('审批已失效');
       const key = JSON.stringify([getTurns(state).at(-1)?.turnId, command.requestId]);
       if (entry.consumed.has(key)) throw new Error('审批已提交，请等待桌面确认');
-      const available = request.params?.availableDecisions || ['accept', 'cancel'];
+      if (this.client.sharedOwner && (!active || request.params?.turnId !== active.turnId)) throw Error('审批轮次已变化，请刷新后操作');
+      const available = request.params?.availableDecisions || (this.client.sharedOwner ? ['accept', 'decline', 'cancel'] : ['accept', 'cancel']);
       if (!['accept', 'decline', 'cancel'].includes(command.decision) || !available.includes(command.decision)) throw new Error('不支持该审批选项');
       const type = String(request.type || request.method || '');
       const method = /command/i.test(type) ? 'replyCommandApproval' : /file/i.test(type) ? 'replyFileApproval' : null;

@@ -3,6 +3,9 @@ import { spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, appendFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { DesktopIpcClient } from '../server/desktop-ipc.mjs';
+import { SharedDesktopClient } from '../server/shared-desktop-client.mjs';
 import { DesktopBridge } from '../server/desktop-bridge.mjs';
 import { DesktopAppTools } from '../server/desktop-app-tools.mjs';
 import { HistoryReader } from '../server/history-reader.mjs';
@@ -55,8 +58,23 @@ export class GatewayRuntime {
     const appTools = process.platform === 'win32' && historyReader ? new DesktopAppTools() : undefined;
     const phoneModelsPath = join(this.root, 'phone-models.local.json');
     const phoneModels = appTools ? await readJson(phoneModelsPath, {}).catch(() => ({})) : {};
+    const ownerPath = join(this.root, 'shared-owner.local.json');
+    const clientFactory = options => {
+      try {
+        const owner = JSON.parse(readFileSync(ownerPath, 'utf8'));
+        if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0 || typeof owner.token !== 'string') throw Error('Invalid owner lease');
+        process.kill(owner.pid, 0);
+        const isCurrent = () => {
+          try { return JSON.parse(readFileSync(ownerPath, 'utf8')).token === owner.token; }
+          catch { return false; }
+        };
+        return new SharedDesktopClient({ ...options, url: owner.url, token: owner.token, isCurrent });
+      } catch {
+        return new DesktopIpcClient(options);
+      }
+    };
     const bridge = new DesktopBridge(config.threads, { historyReader,backgroundHistoryReader:config.codexBinary?new HistoryReader(config.codexBinary):undefined, allowSelectedChats: config.allowSelectedChats,chatCreator:config.codexBinary?new ChatCreator(config.codexBinary):undefined,autoTitles, openDesktopChat: launchDesktopThread,
-      appTools, phoneModels: phoneModels || {}, savePhoneModels: value => atomicJson(phoneModelsPath, value) });
+      appTools, clientFactory, phoneModels: phoneModels || {}, savePhoneModels: value => atomicJson(phoneModelsPath, value) });
     const connectionAddresses={ primary:`https://${config.host}:${config.port}`, ...(config.lanHost ? {lan:`https://${config.lanHost}:${config.port}`} : {}) };
     const uploadIndex=join(this.root,'uploads.local.json');
     const uploads=new Uploads(join(process.env.CODEX_HOME||join(homedir(),'.codex'),'attachments'),{entries:await readJson(uploadIndex,{}),save:entries=>atomicJson(uploadIndex,entries)});

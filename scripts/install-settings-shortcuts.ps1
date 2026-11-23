@@ -25,5 +25,15 @@ foreach ($taskDirectory in $taskTargets) {
     $taskShortcut.IconLocation = (Join-Path $env:SystemRoot 'System32\shell32.dll') + ',17'
     $taskShortcut.WindowStyle = 7
     $taskShortcut.Save()
+    $shared = Join-Path $PluginDirectory 'scripts\start-shared-owner.ps1'
+    if (Test-Path -LiteralPath $shared -PathType Leaf) {
+        $sharedShortcut = $taskShell.CreateShortcut((Join-Path $taskDirectory 'Codex 手机共享控制.lnk'))
+        $sharedShortcut.TargetPath = $taskPowerShell
+        $sharedShortcut.Arguments = '-NoProfile -NoExit -ExecutionPolicy Bypass -File "' + $shared + '" -DataDirectory "' + $DataDirectory + '"'
+        $sharedShortcut.WorkingDirectory = $DataDirectory
+        $sharedShortcut.Description = '在现有 Codex 完全退出后启动桌面与手机的共享控制'
+        $sharedShortcut.IconLocation = $taskShortcut.IconLocation
+        $sharedShortcut.Save()
+    }
 }
 Write-Output '已创建桌面和开始菜单入口：手机连接设置。'

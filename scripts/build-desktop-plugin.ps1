@@ -20,6 +20,7 @@ $taskLicenses = Join-Path $taskPlugin 'licenses'
 New-Item -ItemType Directory -Force -Path $taskRuntime,$taskVendor,$taskScripts,$taskLicenses | Out-Null
 Copy-Item -LiteralPath $NodePath -Destination (Join-Path $taskRuntime 'node.exe') -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'start-desktop-plugin.ps1') -Destination $taskScripts -Force
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'start-shared-owner.ps1') -Destination $taskScripts -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'prepare-desktop-native.ps1') -Destination $taskScripts -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-settings-shortcuts.ps1') -Destination $taskScripts -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'configure-desktop-autostart.ps1') -Destination $taskScripts -Force
