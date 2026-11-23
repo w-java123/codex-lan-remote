@@ -3,7 +3,14 @@ $ErrorActionPreference = 'Stop'
 if (-not $DataDirectory) { $DataDirectory = Join-Path $env:LOCALAPPDATA 'CodexLAN' }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if ([Security.Principal.WindowsPrincipal]::new($identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw '请用普通用户权限打开共享控制入口'
+    # UAC can be disabled, in which case the interactive desktop already runs with this account's full token.
+    $uac = Get-ItemPropertyValue -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableLUA
+    if ($uac -ne 0) { throw '请从 Windows 桌面直接打开共享控制入口，避免以管理员身份运行' }
+    $sessionId = (Get-Process -Id $PID).SessionId
+    $explorer = Get-CimInstance Win32_Process -Filter "Name = 'explorer.exe' AND SessionId = $sessionId" |
+        Where-Object { (Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid).Sid -eq $identity.User.Value } |
+        Select-Object -First 1
+    if (-not $explorer) { throw '请从当前登录账户的 Windows 桌面打开共享控制入口' }
 }
 $package = Get-AppxPackage -Name OpenAI.Codex | Sort-Object Version -Descending | Select-Object -First 1
 if (-not $package) { throw '未找到当前 Windows Codex 桌面安装' }
