@@ -23,7 +23,7 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'start-desktop-plugin.ps1') -Des
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'prepare-desktop-native.ps1') -Destination $taskScripts -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-settings-shortcuts.ps1') -Destination $taskScripts -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'configure-desktop-autostart.ps1') -Destination $taskScripts -Force
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'run-desktop-background.ps1') -Destination $taskScripts -Force
+Remove-Item -LiteralPath (Join-Path $taskScripts 'run-desktop-background.ps1') -ErrorAction SilentlyContinue
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-desktop-plugin.ps1') -Destination $taskOutput -Force
 Copy-Item -LiteralPath (Join-Path $taskRoot 'docs\电脑端插件使用指南.md') -Destination (Join-Path $taskOutput 'README.md') -Force
 $taskMarketplace = Join-Path $taskOutput '.agents\plugins'

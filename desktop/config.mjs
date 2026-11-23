@@ -66,8 +66,11 @@ export function assertNoSubnetConflict(cidr, rows = addresses()) {
 export async function protectDirectory(path) {
   await mkdir(path, { recursive: true, mode: 0o700 });
   if (process.platform === 'win32') {
-    const { stdout } = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'], { windowsHide: true });
-    await run('icacls.exe', [path, '/inheritance:r', '/grant:r', `*${stdout.trim()}:(OI)(CI)F`, '*S-1-5-18:(OI)(CI)F'], { windowsHide: true });
+    const system = join(process.env.SystemRoot || 'C:/Windows', 'System32');
+    const { stdout } = await run(join(system, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { windowsHide: true });
+    const sid = /,"(S-\d+(?:-\d+)+)"\s*$/.exec(stdout)?.[1];
+    if (!sid) throw Error('无法读取当前 Windows 用户 SID');
+    await run(join(system, 'icacls.exe'), [path, '/inheritance:r', '/grant:r', '*' + sid + ':(OI)(CI)F', '*S-1-5-18:(OI)(CI)F'], { windowsHide: true });
   }
 }
 // DPAPI input travels via stdin, never command arguments, files, or logs.

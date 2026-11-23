@@ -28,7 +28,7 @@ try {
   console.error('Codex 手机连接后台已启动（仅本机设置入口）');
 } catch (error) {
   await rm(join(lock, 'pid'), { force: true }); await rmdir(lock);
-  console.error('Codex 手机连接后台启动失败：' + error.message); process.exit(1);
+  console.error('Codex 手机连接后台启动失败：' + error.message); throw error;
 }
 let closing = false;
 async function close() {

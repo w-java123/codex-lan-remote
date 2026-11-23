@@ -9,6 +9,9 @@ $base = Join-Path $BundleDirectory 'plugins/codex-lan-desktop'
 foreach ($name in @('.codex-plugin','.mcp.json','launch.cmd','skills','vendor','runtime','licenses','dependency-hashes.json','scripts')) {
     Copy-Item -LiteralPath (Join-Path $base $name) -Destination $plugin -Recurse
 }
+$taskAutostart = Join-Path $plugin 'scripts/configure-desktop-autostart.ps1'
+[IO.File]::WriteAllText($taskAutostart, [IO.File]::ReadAllText("$root/scripts/configure-desktop-autostart.ps1"), [Text.UTF8Encoding]::new($true))
+Remove-Item -LiteralPath (Join-Path $plugin 'scripts/run-desktop-background.ps1') -ErrorAction SilentlyContinue
 $packet = Join-Path $plugin 'vendor/easytier/Packet.dll'
 if (Test-Path -LiteralPath $packet) { Remove-Item -LiteralPath $packet }
 foreach ($name in @('server','desktop')) { Copy-Item -LiteralPath (Join-Path $root $name) -Destination $plugin -Recurse }

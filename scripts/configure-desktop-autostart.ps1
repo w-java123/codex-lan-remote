@@ -43,7 +43,7 @@ try { $taskOldSuffix = ([BitConverter]::ToString($taskOldHash.ComputeHash([Text.
 $taskOldName = 'Codex LAN Remote-' + $taskSid + '-' + $taskOldSuffix
 if ($taskOldName -ne $taskName) {
     $taskOld = Get-ScheduledTask -TaskName $taskOldName -ErrorAction SilentlyContinue
-    if ($taskOld -and $taskOld.Description -eq $taskMarker) { Unregister-ScheduledTask -TaskName $taskOldName -Confirm:$false -ErrorAction Stop }
+    if ($taskOld -and $taskOld.Description -ne $taskMarker) { $taskOld = $null }
 }
 $taskPrior = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if ($taskPrior -and $taskPrior.Description -ne $taskMarker) { throw '同名后台任务不属于本插件，未修改' }
@@ -57,54 +57,47 @@ $taskMetadata = Join-Path $taskFullRoot 'autostart.local.json'
 if ($taskConfig.autoStart -cne $true) {
     # Unregistering prevents future launches; do not terminate a current connection.
     if ($taskPrior) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false }
+    if ($taskOld) { Unregister-ScheduledTask -TaskName $taskOldName -Confirm:$false }
     [IO.File]::WriteAllText($taskMetadata, '{"kind":"windows-task","configured":false,"elevated":false}', [Text.UTF8Encoding]::new($false))
     return
 }
-$taskRunner = Join-Path $taskPlugin 'scripts\run-desktop-background.ps1'
-if (-not (Test-Path -LiteralPath $taskRunner)) { throw '后台启动脚本缺失，请重新安装完整插件包' }
-$taskElevated = $Highest -or ($taskPrior -and [string]$taskPrior.Principal.RunLevel -eq 'Highest')
+$taskRuntime = Join-Path $taskPlugin 'runtime\node.exe'
+$taskEntry = Join-Path $taskPlugin 'desktop\background.mjs'
+if (-not (Test-Path -LiteralPath $taskRuntime -PathType Leaf) -or -not (Test-Path -LiteralPath $taskEntry -PathType Leaf)) {
+    throw '后台运行时或入口缺失，请重新安装完整插件包'
+}
+$taskPrevious = if ($taskPrior) { $taskPrior } else { $taskOld }
+$taskElevated = $Highest -or ($taskPrevious -and [string]$taskPrevious.Principal.RunLevel -eq 'Highest')
 $taskLevel = if ($taskElevated) { 'Highest' } else { 'Limited' }
 if ($Highest -and -not ([Security.Principal.WindowsPrincipal]::new($taskIdentity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw '配置管理员后台需先允许 Windows 管理员授权' }
-$taskPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$taskLaunch = @'
-$ErrorActionPreference='Stop'
-try {
-    [IO.File]::WriteAllText('__STATUS__','{"phase":"task-entry"}')
-    $env:PSModulePath=[IO.Path]::Combine($env:SystemRoot,'System32\WindowsPowerShell\v1.0\Modules')
-    & '__RUNNER__' -DataDirectory '__ROOT__'
-    exit $LASTEXITCODE
-} catch {
-    [IO.File]::WriteAllText('__FALLBACK__','{"phase":"launcher-failed","code":'+$_.Exception.HResult+'}')
-    exit 1
+$taskAction = New-ScheduledTaskAction -Execute $taskRuntime -Argument ('"' + $taskEntry + '" --data "' + $taskFullRoot + '"') -WorkingDirectory $taskPlugin
+if ($Start) {
+    # The old runtime holds the manager lock until it finishes stopping its gateway.
+    $taskEndpointPath = Join-Path $taskFullRoot 'manager.local.json'
+    if (Test-Path -LiteralPath $taskEndpointPath) {
+        $taskEndpoint = Get-Content -LiteralPath $taskEndpointPath -Raw | ConvertFrom-Json
+        if ($taskEndpoint.origin -notmatch '^http://127\.0\.0\.1:\d+$') { throw '本机管理地址无效' }
+        try {
+            Invoke-RestMethod ($taskEndpoint.origin + '/api/shutdown') -Method Post -Headers @{Authorization=('Bearer ' + $taskEndpoint.token)} -ContentType 'application/json' -Body '{}' -TimeoutSec 3 | Out-Null
+        } catch {
+            if (Get-Process -Id $taskEndpoint.pid -ErrorAction SilentlyContinue) { throw }
+        }
+    }
+    for ($taskAttempt = 0; $taskAttempt -lt 60; $taskAttempt++) {
+        $taskRunning = $taskPrevious -and (Get-ScheduledTask -TaskName $taskPrevious.TaskName).State -eq 'Running'
+        $taskManagerRunning = $taskEndpoint -and (Test-Path -LiteralPath $taskEndpointPath) -and (Get-Process -Id $taskEndpoint.pid -ErrorAction SilentlyContinue)
+        if (-not ($taskRunning -or $taskManagerRunning)) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    if ($taskRunning -or $taskManagerRunning) { throw '旧后台仍在退出，未更新自动恢复任务' }
 }
-'@
-$taskLaunch = $taskLaunch.Replace('__STATUS__', (Join-Path $taskFullRoot 'background-status.local.json').Replace("'","''")).Replace('__RUNNER__', $taskRunner.Replace("'","''")).Replace('__ROOT__', $taskFullRoot.Replace("'","''")).Replace('__FALLBACK__', (Join-Path ([IO.Path]::GetTempPath()) 'codex-lan-startup-status.local.json').Replace("'","''"))
-$taskArgs = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($taskLaunch))
-# Starting a console executable directly can create a terminal before PowerShell
-# processes -WindowStyle. WScript is a GUI host; Run(..., 0, True) creates its
-# child hidden from the start and waits so Scheduler still observes failures.
-$taskWindowlessHost = Join-Path $env:SystemRoot 'System32\wscript.exe'
-if (-not (Test-Path -LiteralPath $taskWindowlessHost)) { throw 'Windows 无窗口脚本宿主不可用，未更新后台任务' }
-$taskWindowlessPath = Join-Path $taskFullRoot 'background-launch.local.vbs'
-$taskWindowlessCommand = '"' + $taskPowerShell + '" ' + $taskArgs
-$taskWindowlessScript = @'
-Option Explicit
-Dim shell, result
-On Error Resume Next
-Set shell = CreateObject("WScript.Shell")
-If Err.Number <> 0 Then WScript.Quit 1
-result = shell.Run("__COMMAND__", 0, True)
-If Err.Number <> 0 Then WScript.Quit 1
-WScript.Quit result
-'@
-$taskWindowlessScript = $taskWindowlessScript.Replace('__COMMAND__', $taskWindowlessCommand.Replace('"','""'))
-[IO.File]::WriteAllText($taskWindowlessPath, $taskWindowlessScript, [Text.Encoding]::ASCII)
-$taskAction = New-ScheduledTaskAction -Execute $taskWindowlessHost -Argument ('//B //Nologo "' + $taskWindowlessPath + '"')
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel $taskLevel
 $taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
 $taskTrigger.Delay = 'PT15S'
 $taskSettings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName $taskName -Action $taskAction -Principal $taskPrincipal -Trigger $taskTrigger -Settings $taskSettings -Description $taskMarker -Force -ErrorAction Stop | Out-Null
+if ($taskOld) { Unregister-ScheduledTask -TaskName $taskOldName -Confirm:$false -ErrorAction Stop }
+Remove-Item -LiteralPath (Join-Path $taskFullRoot 'background-launch.local.vbs') -ErrorAction SilentlyContinue
 $taskValue = @{kind='windows-task'; configured=$true; elevated=[bool]$taskElevated}
 [IO.File]::WriteAllText($taskMetadata, ($taskValue | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
 if ($Start) { Start-ScheduledTask -TaskName $taskName -ErrorAction Stop }
