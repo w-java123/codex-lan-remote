@@ -533,7 +533,7 @@ public final class MainActivity extends Activity {
     }
     private void setButtons(boolean ready) {
         if (send == null) return;
-        updateConnectionDot();updateUsageIndicator();
+        updateConnectionDot();
         boolean active = !MobileState.activeTurnId(currentThread).isEmpty();
         String reason = MobileState.unavailableReason(currentState, currentThread, isSending());
         ready = ready && reason.isEmpty();
@@ -571,6 +571,7 @@ public final class MainActivity extends Activity {
             if(questions!=null)for(int i=0;i<questions.length();i++){JSONObject request=questions.getJSONObject(i);if(!hidden.contains(questionDismissalKey(request)))shown.put(request);}
             currentThread.put("questions",shown);
         }
+        updateUsageIndicator();
         updateQuestionCards();
         if (currentThread == null) {
             status.setText(state.optBoolean("online") ? "正在加载所选聊天历史…" : "离线 · 暂无该聊天的本地记录");
@@ -606,7 +607,7 @@ public final class MainActivity extends Activity {
     private JSONObject visibleUsage(){return api!=null&&api.fingerprint.equals(SessionService.usageComputer)?SessionService.usage:null;}
     private void updateUsageIndicator(){
         JSONObject value=visibleUsage();boolean online=currentState!=null&&currentState.optBoolean("online");
-        if(usageRings!=null)usageRings.quota(value,online,"waiting".equals(connectionPresentation()));
+        if(usageRings!=null)usageRings.quota(value,online);
         if(usagePrimary!=null&&usagePopup!=null&&usagePopup.isShowing())fillUsageDetails(value,online);
     }
     private String usageLine(JSONObject window,String fallback){
