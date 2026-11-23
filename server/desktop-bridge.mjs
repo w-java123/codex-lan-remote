@@ -350,6 +350,51 @@ export class DesktopBridge extends EventEmitter {
     throw Error('桌面尚未确认消息送达，请先核对会话，避免重复发送');
   }
 
+  canUseNativeQueue(entry){
+    return this.canUseAppTools(entry)&&['idle','active'].includes(entry.appToolsStatus)&&
+      this.historyReader?.hasNativeQueue?.(entry.id)===true;
+  }
+
+  async commandNativeQueue(entry,command){
+    if(!this.canUseNativeQueue(entry))throw Error('当前桌面会话的原生队列尚不可用');
+    const {id}=entry;
+    const requireAuthorization=()=>{
+      if(!this.canUseNativeQueue(entry))throw Error('当前桌面会话的原生队列已变化，请刷新');
+      if(command.authorized?.()===false)throw Object.assign(Error('设备授权已撤销'),{status:401});
+    };
+    requireAuthorization();
+    if(command.op==='queue-remove'){
+      if(!(entry.nativeQueue||[]).some(row=>row.id===command.messageId&&row.serverQueue))throw Error('只能移出当前的原生排队消息，请刷新');
+      if(!await this.historyReader.deleteNativeMessage(id,command.messageId))throw Error('消息已离开队列，请刷新');
+      entry.queueEpoch=(entry.queueEpoch||0)+1;
+      entry.nativeQueue=(entry.nativeQueue||[]).filter(row=>row.id!==command.messageId);
+      this.emit('changed');
+      return {accepted:true};
+    }
+    if((entry.nativeQueue||[]).length>=100)throw Error('此会话已有 100 条排队消息');
+    let text=command.text?.trim()||'';
+    const attachments=command.attachments||[];
+    const cwd=this.fileRoot(id);
+    const slash=/^\/([\w.-]+)(?=\s|$)/.exec(text);
+    let skills=[];
+    if(slash){
+      skills=(cwd?await this.historyReader.skills(cwd):[]).filter(row=>row.name===slash[1]);
+      if(skills.length!==1)throw Error('此斜杠命令或技能不可用，请从手机命令列表选择');
+      text='$'+slash[1]+text.slice(slash[0].length);
+    }
+    if(!text&&!attachments.length)throw Error('请输入消息或选择附件');
+    const messageId=randomUUID();
+    const {input}=messageInput(text,{attachments,skills,cwd,id:messageId});
+    requireAuthorization();
+    let queued;
+    try{queued=await this.historyReader.enqueueNativeMessage(id,messageId,input);}
+    catch{throw Error('桌面未确认排队，请先核对队列，避免重复提交');}
+    entry.queueEpoch=(entry.queueEpoch||0)+1;
+    entry.nativeQueue=[...(entry.nativeQueue||[]).filter(row=>row.id!==queued.id),queued];
+    this.emit('changed');
+    return {accepted:true,queued:true,nativeQueue:true,messageId:queued.id};
+  }
+
   async refreshQueue(entry,generation){
     if(!this.historyReader?.queuedMessages||entry.queueLoading)return;
     entry.queueLoading=true;const epoch=entry.queueEpoch||0;
@@ -390,6 +435,7 @@ export class DesktopBridge extends EventEmitter {
       const appToolsAvailable=this.canUseAppTools(entry)&&!!entry.appToolsStatus;
       const appToolsReady=appToolsAvailable&&entry.appToolsStatus==='idle'&&!entry.appToolsPending;
       const phoneModel=appToolsAvailable?this.phoneModels.get(entry.id):undefined;
+      const nativeQueueSupported=appToolsAvailable&&this.canUseNativeQueue(entry);
       const summary = summarizeThread(state);
       const turns = new Map((entry.history || []).map(turn => [turn.id, turn]));
       for (const turn of summary.turns) {
@@ -404,9 +450,9 @@ export class DesktopBridge extends EventEmitter {
           toolResults: turn.toolResults?.length ? turn.toolResults : previous?.toolResults || [] });
       }
       return { id: entry.id, name: entry.name || '桌面聊天', ready: entry.ready||appToolsReady,
-        ...(appToolsAvailable?{attachmentsSupported:false,modelSelectionSupported:this.canChooseAppToolsModel(entry)}:{}),
-        queueSupported:!appToolsAvailable&&!!this.historyReader?.queuedMessages,
-        queuedMessages:(entry.nativeQueue||[]).slice(0,100).map(message=>({id:message.id,text:String(message.prompt||message.text||message.context?.prompt||[...message.context?.fileAttachments||[],...message.context?.imageAttachments||[]].map(row=>row.label||row.filename||'附件').join('、')).slice(0,16000),status:message.submission?.status||'queued'})),
+        ...(appToolsAvailable?{attachmentsSupported:nativeQueueSupported,nativeQueueSupported,modelSelectionSupported:this.canChooseAppToolsModel(entry)}:{}),
+        queueSupported:appToolsAvailable?nativeQueueSupported:!!this.historyReader?.queuedMessages,
+        queuedMessages:(entry.nativeQueue||[]).slice(0,100).map(message=>({id:message.id,text:String(message.prompt||message.text||message.context?.prompt||[...message.context?.fileAttachments||[],...message.context?.imageAttachments||[]].map(row=>row.label||row.filename||'附件').join('、')).slice(0,16000),status:message.submission?.status||'queued',...(appToolsAvailable?{removable:nativeQueueSupported&&message.serverQueue===true}:{})})),
         model: phoneModel?.model || state?.latestThreadSettings?.model || state?.latestModel || entry.modelSettings?.model || '', reasoningEffort:phoneModel?.effort || state?.latestReasoningEffort || state?.latestThreadSettings?.effort || entry.modelSettings?.reasoningEffort || '',
         serviceTier:state?.latestThreadSettings?.serviceTier??'default',
         activity: entry.ready ? summary.activity : undefined,
@@ -438,7 +484,7 @@ export class DesktopBridge extends EventEmitter {
     });
   }
   async command(threadId, command, serialized = false) {
-    if(!serialized&&['queue','queue-remove'].includes(command.op)){
+    if(!serialized&&['start','queue','queue-remove'].includes(command.op)){
       const entry=this.entries.get(threadId);if(!entry)throw Error('聊天尚未就绪，请等待重新连接');
       const operation=(entry.queueOperation||Promise.resolve()).catch(()=>{}).then(()=>this.command(threadId,command,true));entry.queueOperation=operation;
       try{return await operation;}finally{if(entry.queueOperation===operation)delete entry.queueOperation;}
@@ -446,6 +492,10 @@ export class DesktopBridge extends EventEmitter {
     const entry = this.entries.get(threadId);
     if(entry&&this.canUseAppTools(entry)&&entry.appToolsStatus){
       if(command.op==='model')return this.chooseAppToolsModel(entry,command);
+      if(['queue','queue-remove'].includes(command.op)||
+         command.op==='start'&&(command.attachments?.length||/^\/[\w.-]+(?=\s|$)/.test(command.text?.trim()||''))){
+        return this.commandNativeQueue(entry,command);
+      }
       return this.sendWithAppTools(entry,command);
     }
     if (!entry || !entry.ready || !this.client?.initialized) throw new Error('聊天尚未就绪，请等待重新连接');

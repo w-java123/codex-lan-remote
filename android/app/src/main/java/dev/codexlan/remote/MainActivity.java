@@ -494,7 +494,7 @@ public final class MainActivity extends Activity {
     }
     private void submit(String operation) {
         String blocked = MobileState.unavailableReason(currentState, currentThread, isSending());
-        if (!blocked.isEmpty()) { toast(blocked); return; }
+        if (!blocked.isEmpty()&&!("queue".equals(operation)&&MobileState.canUseNativeQueue(currentState,currentThread,isSending()))) { toast(blocked); return; }
         String value = composer.getText().toString();
         String builtin=SlashCommands.builtin(value);if(!builtin.isEmpty()){runSlash(builtin);return;}
         if (value.trim().isEmpty()&&!phoneAttachments.has(attachmentKey())) { toast("请输入消息或选择附件"); return; }
@@ -519,12 +519,13 @@ public final class MainActivity extends Activity {
                     payload.put("attachmentIds",ids);
                     if(epoch!=generation||client!=api||Thread.currentThread().isInterrupted())throw new Exception("连接已切换，附件保留在草稿中，请确认后再发送");
                 }
-                channel.call("POST", "/v1/command", payload, id);
+                JSONObject result=channel.call("POST", "/v1/command", payload, id);
                 runOnUiThread(() -> { if (epoch == generation && client == api) {
                     phoneAttachments.accepted(filesKey,files);renderAttachments();
-                    if(clearComposer&&("start".equals(payload.optString("op"))||"steer".equals(payload.optString("op")))){sentMessages.accepted(chat,id,payload.optString("text"),before);if(chat.equals(selectedThreadId)){renderRevision++;scheduleRows();}}
+                    if(clearComposer&&!result.optBoolean("queued")&&("start".equals(payload.optString("op"))||"steer".equals(payload.optString("op")))){sentMessages.accepted(chat,id,payload.optString("text"),before);if(chat.equals(selectedThreadId)){renderRevision++;scheduleRows();}}
                     if (clearComposer && payload.optString("threadId").equals(selectedThreadId) && composer.getText().toString().equals(textBefore)) { composer.setText(""); drafts.remove(selectedThreadId); }
                     if("model".equals(payload.optString("op"))){JSONObject cached=modelCache.get(modelCacheKey(client,payload.optString("threadId")));if(cached!=null)try{cached.put("current",new JSONObject().put("model",payload.optString("model")).put("effort",payload.optString("effort")).put("serviceTier",payload.optString("serviceTier",cached.optJSONObject("current")==null?"default":cached.optJSONObject("current").optString("serviceTier","default"))));}catch(Exception ignored){}}
+                    if(result.optBoolean("nativeQueue"))toast("已加入桌面队列，将使用桌面会话的模型设置");
                     if(confirmed!=null)confirmed.run();
                 } });
             } catch (Exception e) { runOnUiThread(() -> { if (epoch == generation && client == api){if(failed!=null)failed.run();toast("提交未确认，请检查聊天状态后再操作：" + error(e));} }); }
@@ -538,21 +539,26 @@ public final class MainActivity extends Activity {
         String reason = MobileState.unavailableReason(currentState, currentThread, isSending());
         ready = ready && reason.isEmpty();
         String action=composerAction();
+        boolean nativeQueue=MobileState.canUseNativeQueue(currentState,currentThread,isSending());
+        boolean nativeQueued="queue".equals(action)&&nativeQueue;
         if(sendModeChoice!=null){sendModeChoice.setText("steer".equals(sendMode())?"插话  ⌄":"排队  ⌄");sendModeChoice.setContentDescription("发送模式："+("steer".equals(sendMode())?"立即插话":"排队发送")+"，点击切换");}
-        boolean dictating=speechInput!=null&&speechInput.running(),empty=composer.getText().toString().trim().isEmpty()&&!phoneAttachments.has(attachmentKey()),stop="interrupt".equals(action)&&!dictating,voice=empty&&!stop&&!isSending();send.setEnabled(ready&&!"none".equals(action)||empty&&!isSending());send.setAlpha(send.isEnabled()?1f:.35f);
-        if(attachFile!=null){attachFile.setEnabled(ready);attachFile.setAlpha(ready?1f:.35f);}renderAttachments();
+        boolean dictating=speechInput!=null&&speechInput.running(),empty=composer.getText().toString().trim().isEmpty()&&!phoneAttachments.has(attachmentKey()),stop="interrupt".equals(action)&&!dictating,voice=empty&&!stop&&!isSending();send.setEnabled((ready||nativeQueued)&&!"none".equals(action)||empty&&!isSending());send.setAlpha(send.isEnabled()?1f:.35f);
+        if(attachFile!=null){boolean canAttach=(ready||nativeQueue)&&currentThread!=null&&currentThread.optBoolean("attachmentsSupported",true);attachFile.setEnabled(canAttach);attachFile.setAlpha(canAttach?1f:.35f);}renderAttachments();
         send.setBackground(rounded(stop?foreground:(palette.dark?0xff3478f6:0xff2867d7),22));
         UiIcon image=new UiIcon(stop?"stop":voice?"voice":"send",stop?background:Color.WHITE);image.setBounds(0,0,dp(20),dp(20));send.setCompoundDrawables(image,null,null,null);
         send.setContentDescription(dictating&&empty?"正在语音输入，点击结束":isSending()?"正在提交":stop?"停止当前回复，长按语音输入":voice?"语音输入，长按开始":"queue".equals(action)?"排队发送":"steer".equals(action)?"插话发送":"发送消息");
         JSONArray queued=currentThread==null?null:currentThread.optJSONArray("queuedMessages");if(queueChip!=null){int count=queued==null?0:queued.length();queueChip.setVisibility(count==0?View.GONE:View.VISIBLE);queueChip.setText("已排队 "+count+" 条 · 点击查看");}
-        if (sendStatus != null) sendStatus.setText(dictating&&!voiceStatus.isEmpty()?voiceStatus:reason.isEmpty()
+        if (sendStatus != null) sendStatus.setText(dictating&&!voiceStatus.isEmpty()?voiceStatus
+            : nativeQueued||nativeQueue&&phoneAttachments.has(attachmentKey())?"加入桌面队列 · 使用桌面会话的模型设置"
+            : nativeQueue&&"active".equals(currentThread.optString("runtimeStatus"))&&"steer".equals(sendMode())?"当前可排队发送 · 点击发送模式切换"
+            : reason.isEmpty()
             ? active ? (stop?"正在回复 · 点击方形按钮停止":"queue".equals(action)?"排队模式 · 当前任务结束后按顺序发送":"插话模式 · 立即补充到当前任务") : "queue".equals(action)?"消息将加入现有队列，按顺序发送":"消息发送至电脑上的 Codex"
             : reason + " · 点此重新同步");
     }
     private void queueDialog(){
         if(currentThread==null)return;JSONArray messages=currentThread.optJSONArray("queuedMessages");if(messages==null||messages.length()==0){toast("暂无排队消息");return;}
         android.app.Dialog dialog=new android.app.Dialog(this);LinearLayout page=panel(dialog,"排队消息");ScrollView scroll=new ScrollView(this);LinearLayout items=vertical();scroll.addView(items);page.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
-        for(int i=0;i<messages.length();i++){JSONObject message=messages.optJSONObject(i);if(message==null)continue;LinearLayout card=vertical();card.setPadding(dp(14),dp(12),dp(14),dp(12));card.setBackground(rounded(surface(38,38,38),18));TextView label=text((i+1)+". "+message.optString("text"),14,foreground);label.setMaxLines(5);card.addView(label);Button remove=button("移出队列");String state=message.optString("status");remove.setEnabled(currentThread.optBoolean("queueSupported")&&!state.equals("sending")&&!state.equals("outcome-unknown"));remove.setOnClickListener(v->{try{command(new JSONObject().put("op","queue-remove").put("messageId",message.getString("id")),false,dialog::dismiss);}catch(Exception e){toast(error(e));}});card.addView(remove);LinearLayout.LayoutParams space=new LinearLayout.LayoutParams(-1,-2);space.bottomMargin=dp(10);items.addView(card,space);}
+        for(int i=0;i<messages.length();i++){JSONObject message=messages.optJSONObject(i);if(message==null)continue;LinearLayout card=vertical();card.setPadding(dp(14),dp(12),dp(14),dp(12));card.setBackground(rounded(surface(38,38,38),18));TextView label=text((i+1)+". "+message.optString("text"),14,foreground);label.setMaxLines(5);card.addView(label);Button remove=button("移出队列");String state=message.optString("status");remove.setEnabled(currentThread.optBoolean("queueSupported")&&message.optBoolean("removable",true)&&!state.equals("sending")&&!state.equals("outcome-unknown"));remove.setOnClickListener(v->{try{command(new JSONObject().put("op","queue-remove").put("messageId",message.getString("id")),false,dialog::dismiss);}catch(Exception e){toast(error(e));}});card.addView(remove);LinearLayout.LayoutParams space=new LinearLayout.LayoutParams(-1,-2);space.bottomMargin=dp(10);items.addView(card,space);}
         dialog.show();dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent);dialog.getWindow().setLayout(Math.min(dp(420),getResources().getDisplayMetrics().widthPixels-dp(24)),(int)(getResources().getDisplayMetrics().heightPixels*.72f));
     }
     private void render(JSONObject state) throws Exception {

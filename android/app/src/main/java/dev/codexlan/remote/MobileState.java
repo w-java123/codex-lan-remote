@@ -22,7 +22,7 @@ final class MobileState {
                     // Stored content fills the cache; the latest live status always wins.
                     JSONArray liveTurns=live.optJSONArray("turns");if(live.optBoolean("ready")&&liveTurns!=null)for(int j=0;j<liveTurns.length();j++){JSONObject current=liveTurns.getJSONObject(j),cached=turns.get(current.optString("id"));if(cached!=null){cached=copyFields(cached);for(String field:new String[]{"status","failureReason","startedAtMs"})if(current.has(field))cached.put(field,current.get(field));turns.put(current.optString("id"),cached);}}
                     while(turns.size()>50)turns.remove(turns.keySet().iterator().next());row=copyFields(history).put("turns",new JSONArray(turns.values()));
-                    for(String field:new String[]{"attachmentsSupported","modelSelectionSupported","runtimeStatus","queuedMessages","queueSupported"})if(live.has(field))row.put(field,live.get(field));
+                    for(String field:new String[]{"attachmentsSupported","modelSelectionSupported","runtimeStatus","queuedMessages","queueSupported","nativeQueueSupported"})if(live.has(field))row.put(field,live.get(field));
                     if(live.optBoolean("ready"))for(String field:new String[]{"ready","writable","activeTurnId","approvals","questions","metadataOnly","model","reasoningEffort","serviceTier","revision","activity"})if(live.has(field))row.put(field,live.get(field));
                 }
                 row.put("historyUpdatedAt",history.optLong("historyUpdatedAt"));}
@@ -45,9 +45,16 @@ final class MobileState {
     static String composerAction(JSONObject state, JSONObject thread, boolean sending, String draft) {
         return composerAction(state,thread,sending,draft,"auto");
     }
+    static boolean canUseNativeQueue(JSONObject state, JSONObject thread, boolean sending) {
+        return !sending&&state!=null&&state.optBoolean("online")&&thread!=null&&thread.optBoolean("writable")
+            &&thread.optBoolean("nativeQueueSupported");
+    }
     static String composerAction(JSONObject state, JSONObject thread, boolean sending, String draft,String mode) {
+        boolean hasInput=draft!=null&&!draft.trim().isEmpty();
+        if(canUseNativeQueue(state,thread,sending)&&"active".equals(thread.optString("runtimeStatus")))
+            return hasInput&&!"steer".equals(mode)?"queue":"none";
         if (!unavailableReason(state,thread,sending).isEmpty()) return "none";
-        boolean active=!activeTurnId(thread).isEmpty(), hasText=draft!=null && !draft.trim().isEmpty();
+        boolean active=!activeTurnId(thread).isEmpty(), hasText=hasInput;
         if(active&&hasText&&"steer".equals(mode))return "steer";
         if(active&&hasText&&"queue".equals(mode)&&!thread.optBoolean("queueSupported"))return "none";
         boolean queued=thread.optBoolean("queueSupported")&&(active||thread.optJSONArray("queuedMessages")!=null&&thread.optJSONArray("queuedMessages").length()>0);
@@ -124,7 +131,7 @@ final class MobileState {
             if (values == null) continue;
             for (int i = 0; i < values.length(); i++) {
                 JSONObject thread = copyFields(values.getJSONObject(i));
-                if (source == previous) thread.put("ready", false).put("approvals", new JSONArray()).put("questions", new JSONArray());
+                if (source == previous) thread.put("ready", false).put("nativeQueueSupported",false).put("approvals", new JSONArray()).put("questions", new JSONArray());
                 String id = thread.getString("id"); JSONObject old = threads.get(id);
                 LinkedHashMap<String, JSONObject> turns = new LinkedHashMap<>();
                 for (JSONObject version : new JSONObject[] { old, thread }) {
@@ -161,7 +168,7 @@ final class MobileState {
         JSONArray threads = value.optJSONArray("threads");
         if (threads != null) {
             JSONArray offline=new JSONArray();
-            for(int i=0;i<threads.length();i++)offline.put(copyFields(threads.getJSONObject(i)).put("ready",false).put("approvals",new JSONArray()).put("questions",new JSONArray()).put("attentionRequests",new JSONArray()));
+            for(int i=0;i<threads.length();i++)offline.put(copyFields(threads.getJSONObject(i)).put("ready",false).put("nativeQueueSupported",false).put("approvals",new JSONArray()).put("questions",new JSONArray()).put("attentionRequests",new JSONArray()));
             result.put("threads",offline);
         }
         return result;

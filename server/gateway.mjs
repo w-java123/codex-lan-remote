@@ -100,9 +100,9 @@ export function createGateway({ tls, bridge, uploads, desktopVersion = '', devic
       if(request.method==='POST'&&url.pathname==='/v1/upload'){
         if(!uploads)throw fail(501,'请更新电脑插件以发送附件');
         const threadId=url.searchParams.get('threadId');
-        const allowed=()=>sessions.has(sessionHash)&&bridge.snapshot().some(row=>row.id===threadId&&row.writable&&row.ready);
+        const allowed=()=>sessions.has(sessionHash)&&bridge.snapshot().some(row=>row.id===threadId&&row.writable&&(row.ready||row.nativeQueueSupported===true));
         if(!allowed())throw fail(403,'聊天未授权写入或尚未就绪');
-        if(bridge.snapshot().some(row=>row.id===threadId&&row.attachmentsSupported===false))throw fail(409,'当前桌面连接仅支持纯文本发送');
+        if(bridge.snapshot().some(row=>row.id===threadId&&row.attachmentsSupported===false))throw fail(409,'当前桌面会话的附件发送尚不可用');
         if(request.headers['content-type']!=='application/octet-stream')throw fail(415,'需要二进制文件');
         if(Number(request.headers['content-length'])>32*1024*1024)throw fail(413,'文件超过 32 MB');
         reply(response,200,await uploads.receive(request,{name:url.searchParams.get('name'),threadId,sessionHash,authorized:allowed}));return;

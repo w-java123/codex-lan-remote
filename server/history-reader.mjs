@@ -6,6 +6,19 @@ import { accountUsage } from './account-usage.mjs';
 import { desktopSidebar, groupThreads, PINNED_SECTION_ID } from './sidebar.mjs';
 import { resolveDesktopBinary } from './desktop-binary.mjs';
 import { taskFailure } from './task-failure.mjs';
+function nativeQueueRow(row){
+  const inputs=row.input||[];
+  const text=inputs.filter(item=>item.type==='text').map(item=>String(item.text||'')).join('\n');
+  const boundary='\n\n## My request:\n';
+  const hasAttachments=text.startsWith('# Files mentioned by the user:\n')&&text.includes(boundary);
+  const files=hasAttachments?text.slice(0,text.indexOf(boundary)).split('\n').flatMap(line=>{
+    const label=/^## (.+?): /.exec(line)?.[1];
+    return label?[label]:[];
+  }):[];
+  const prompt=hasAttachments?text.slice(text.indexOf(boundary)+boundary.length).trim()||files.join('、'):text;
+  return {id:row.id,clientUserMessageId:row.clientUserMessageId,serverQueue:true,prompt};
+}
+
 export class HistoryReader {
   constructor(binary, {sidebarReader = desktopSidebar} = {}) { this.binary = binary; this.sidebarReader=sidebarReader;this.pending = new Map(); this.sequence = 0; }
   async connect() {
@@ -31,7 +44,7 @@ export class HistoryReader {
       let value; try { value = JSON.parse(line); } catch { return; }
       if (value.method === 'account/updated' || value.method === 'account/rateLimits/updated') this.usageAt = 0;
       if (value.method && value.id !== undefined) {
-        child.stdin.write(JSON.stringify({ id: value.id, error: { code: -32601, message: 'Read-only history client' } }) + '\n'); return;
+        child.stdin.write(JSON.stringify({ id: value.id, error: { code: -32601, message: 'History and queue client does not handle live approvals' } }) + '\n'); return;
       }
       const entry = this.pending.get(value.id); if (!entry) return;
       this.pending.delete(value.id); clearTimeout(entry.timer);
@@ -42,7 +55,7 @@ export class HistoryReader {
     this.initialized = true;
   }
   request(method, params) {
-    if (!['initialize', 'thread/list', 'thread/section/move', 'thread/turns/list', 'thread/queue/list', 'skills/list', 'model/list', 'account/rateLimits/read'].includes(method)) throw Error('历史客户端禁止该操作');
+    if (!['initialize', 'thread/list', 'thread/section/move', 'thread/turns/list', 'thread/queue/list', 'thread/queue/add', 'thread/queue/delete', 'skills/list', 'model/list', 'account/rateLimits/read'].includes(method)) throw Error('历史与队列客户端禁止该操作');
     return new Promise((resolve, reject) => {
       const id = ++this.sequence;
       const timer = setTimeout(() => { this.pending.delete(id); reject(Error('历史读取超时')); }, 15000);
@@ -86,8 +99,7 @@ export class HistoryReader {
         await this.connect();let cursor;const seen=new Set();
         do{
           const page=await this.request('thread/queue/list',{threadId,limit:100,...cursor?{cursor}:{}});
-          server.push(...(page.data||[]).filter(row=>typeof row.id==='string').map(row=>({id:row.id,clientUserMessageId:row.clientUserMessageId,serverQueue:true,
-            prompt:(row.input||[]).filter(item=>item.type==='text').map(item=>String(item.text||'')).join('\n')})));
+          server.push(...(page.data||[]).filter(row=>typeof row.id==='string').map(nativeQueueRow));
           cursor=page.nextCursor;if(cursor&&seen.has(cursor))throw Error('排队消息分页游标重复');if(cursor)seen.add(cursor);
         }while(cursor&&server.length<100);
         this.serverQueues??=new Map();this.serverQueues.set(threadId,server);
@@ -98,6 +110,20 @@ export class HistoryReader {
     }
     const clients=new Set(server.map(row=>row.clientUserMessageId));
     return [...server,...local.filter(row=>!clients.has(row.id))];
+  }
+  hasNativeQueue(threadId){
+    return this.serverQueueSupported!==false&&this.serverQueues?.has(threadId)===true;
+  }
+  async enqueueNativeMessage(threadId,clientUserMessageId,input){
+    await this.connect();
+    const result=await this.request('thread/queue/add',{threadId,clientUserMessageId,input});
+    if(!result?.queuedSubmission?.id||result.queuedSubmission.clientUserMessageId!==clientUserMessageId)throw Error('桌面未确认排队，请先核对队列');
+    return nativeQueueRow(result.queuedSubmission);
+  }
+  async deleteNativeMessage(threadId,queuedSubmissionId){
+    await this.connect();
+    const result=await this.request('thread/queue/delete',{threadId,queuedSubmissionId});
+    return result?.deleted===true;
   }
   async models() {
     await this.connect();
