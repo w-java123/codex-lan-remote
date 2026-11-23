@@ -391,7 +391,7 @@ export class DesktopBridge extends EventEmitter {
           toolResults: turn.toolResults?.length ? turn.toolResults : previous?.toolResults || [] });
       }
       return { id: entry.id, name: entry.name || '桌面聊天', ready: entry.ready||appToolsReady,
-        ...(appToolsAvailable?{attachmentsSupported:false}:{}),
+        ...(appToolsAvailable?{attachmentsSupported:false,modelSelectionSupported:false}:{}),
         queueSupported:!appToolsAvailable&&!!this.historyReader?.queuedMessages,
         queuedMessages:(appToolsAvailable?[]:(entry.nativeQueue||[])).slice(0,100).map(message=>({id:message.id,text:String(message.prompt||message.text||message.context?.prompt||[...message.context?.fileAttachments||[],...message.context?.imageAttachments||[]].map(row=>row.label||row.filename||'附件').join('、')).slice(0,16000),status:message.submission?.status||'queued'})),
         model: state?.latestThreadSettings?.model || state?.latestModel || entry.modelSettings?.model || '', reasoningEffort:state?.latestReasoningEffort || state?.latestThreadSettings?.effort || entry.modelSettings?.reasoningEffort || '',
@@ -527,6 +527,7 @@ export class DesktopBridge extends EventEmitter {
   }
   async modelOptions(threadId){
     const entry=this.entries.get(threadId);
+    if(entry&&this.canUseAppTools(entry)&&entry.appToolsStatus)throw Error('请在电脑端选择模型');
     if(!entry?.ready)throw Error('桌面聊天尚未就绪');
     if(!this.modelCatalog || Date.now()-this.modelCatalogAt>60000){
       if(!this.historyReader?.models)throw Error('当前桌面版本不支持模型列表');

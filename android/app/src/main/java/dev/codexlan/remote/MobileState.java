@@ -22,7 +22,8 @@ final class MobileState {
                     // Stored content fills the cache; the latest live status always wins.
                     JSONArray liveTurns=live.optJSONArray("turns");if(live.optBoolean("ready")&&liveTurns!=null)for(int j=0;j<liveTurns.length();j++){JSONObject current=liveTurns.getJSONObject(j),cached=turns.get(current.optString("id"));if(cached!=null){cached=copyFields(cached);for(String field:new String[]{"status","failureReason","startedAtMs"})if(current.has(field))cached.put(field,current.get(field));turns.put(current.optString("id"),cached);}}
                     while(turns.size()>50)turns.remove(turns.keySet().iterator().next());row=copyFields(history).put("turns",new JSONArray(turns.values()));
-                    if(live.optBoolean("ready"))for(String field:new String[]{"ready","writable","activeTurnId","approvals","questions","queueSupported","queuedMessages","metadataOnly","model","reasoningEffort","serviceTier","revision","runtimeStatus","activity"})if(live.has(field))row.put(field,live.get(field));
+                    for(String field:new String[]{"modelSelectionSupported","runtimeStatus"})if(live.has(field))row.put(field,live.get(field));
+                    if(live.optBoolean("ready"))for(String field:new String[]{"ready","writable","activeTurnId","approvals","questions","queueSupported","queuedMessages","metadataOnly","model","reasoningEffort","serviceTier","revision","activity"})if(live.has(field))row.put(field,live.get(field));
                 }
                 row.put("historyUpdatedAt",history.optLong("historyUpdatedAt"));}
             after.put(row);
@@ -106,7 +107,8 @@ final class MobileState {
         if (sending) return "正在提交，请稍候…";
         if (state == null || !state.optBoolean("online")) return "连接中断，请检查 EasyTier 或重新连接";
         if (thread == null) return "正在加载所选聊天，请稍候";
-        if (!thread.optBoolean("ready")) return "聊天历史可读，请先在电脑打开该聊天，或点击重新同步";
+        if (!thread.optBoolean("ready")) return "active".equals(thread.optString("runtimeStatus"))
+            ? "电脑正在执行，任务结束后可发送" : "聊天历史可读，请先在电脑打开该聊天，或点击重新同步";
         if (!thread.optBoolean("writable", true)) return "此聊天仅允许读取，需要在电脑授权后发送";
         return "";
     }

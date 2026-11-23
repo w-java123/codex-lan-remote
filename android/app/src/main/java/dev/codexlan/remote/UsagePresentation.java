@@ -19,10 +19,10 @@ final class UsagePresentation {
     static String percent(JSONObject window) {
         float value=remaining(window);return value<0?"暂不可用":Math.round(value)+"% 剩余";
     }
-    static String connection(JSONObject state,JSONObject thread,String message) {
+    static String connection(JSONObject state,JSONObject thread,String message,boolean sending,String sendMode) {
         if(state==null)return "connecting";
         if(!state.optBoolean("online"))return message!=null&&(message.contains("中断")||message.contains("失败")||message.contains("无法"))?"error":"offline";
-        if(thread==null||!thread.optBoolean("ready"))return "waiting";
+        if("none".equals(MobileState.composerAction(state,thread,sending,"text",sendMode)))return "waiting";
         if((thread.optJSONArray("approvals")!=null&&thread.optJSONArray("approvals").length()>0)||(thread.optJSONArray("questions")!=null&&thread.optJSONArray("questions").length()>0))return "waiting";
         return MobileState.activeTurnId(thread).isEmpty()?"connected":"busy";
     }

@@ -186,12 +186,12 @@ public class MobileStateTest {
     }
     @Test public void connectionDotSeparatesLiveBusyPendingAndDisconnectedStates() throws Exception {
         JSONObject online=new JSONObject().put("online",true),thread=new JSONObject().put("ready",true).put("activeTurnId",JSONObject.NULL);
-        assertEquals("connecting",UsagePresentation.connection(null,null,""));assertEquals("connected",UsagePresentation.connection(online,thread,""));
-        thread.put("activeTurnId","turn");assertEquals("busy",UsagePresentation.connection(online,thread,""));
-        thread.put("approvals",new JSONArray().put(new JSONObject()));assertEquals("waiting",UsagePresentation.connection(online,thread,""));
-        assertEquals("waiting",UsagePresentation.connection(online,null,""));
-        assertEquals("error",UsagePresentation.connection(new JSONObject(),thread,"连接中断，正在重连"));
-        assertEquals("offline",UsagePresentation.connection(new JSONObject(),thread,"后台同步已停止"));
+        assertEquals("connecting",UsagePresentation.connection(null,null,"",false,"auto"));assertEquals("connected",UsagePresentation.connection(online,thread,"",false,"auto"));
+        thread.put("activeTurnId","turn");assertEquals("busy",UsagePresentation.connection(online,thread,"",false,"auto"));
+        thread.put("approvals",new JSONArray().put(new JSONObject()));assertEquals("waiting",UsagePresentation.connection(online,thread,"",false,"auto"));
+        assertEquals("waiting",UsagePresentation.connection(online,null,"",false,"auto"));
+        assertEquals("error",UsagePresentation.connection(new JSONObject(),thread,"连接中断，正在重连",false,"auto"));
+        assertEquals("offline",UsagePresentation.connection(new JSONObject(),thread,"后台同步已停止",false,"auto"));
     }
     @Test public void dhcpQrWaitsForNativeAssignmentAndNeverUsesDesktopIpAsPhoneIp() throws Exception {
         JSONObject et=new JSONObject().put("name","fixture").put("secret","").put("dhcp",true).put("networkCidr","10.90.0.1/24").put("peers","tcp://public.easytier.cn:11010");

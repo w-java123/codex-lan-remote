@@ -533,6 +533,7 @@ public final class MainActivity extends Activity {
     }
     private void setButtons(boolean ready) {
         if (send == null) return;
+        updateConnectionDot();updateUsageIndicator();
         boolean active = !MobileState.activeTurnId(currentThread).isEmpty();
         String reason = MobileState.unavailableReason(currentState, currentThread, isSending());
         ready = ready && reason.isEmpty();
@@ -570,7 +571,6 @@ public final class MainActivity extends Activity {
             if(questions!=null)for(int i=0;i<questions.length();i++){JSONObject request=questions.getJSONObject(i);if(!hidden.contains(questionDismissalKey(request)))shown.put(request);}
             currentThread.put("questions",shown);
         }
-        updateConnectionDot();updateUsageIndicator();
         updateQuestionCards();
         if (currentThread == null) {
             status.setText(state.optBoolean("online") ? "正在加载所选聊天历史…" : "离线 · 暂无该聊天的本地记录");
@@ -578,6 +578,8 @@ public final class MainActivity extends Activity {
         }
         selectChat.setText(currentThread.optString("name", "Codex"));
         status.setText(!state.optBoolean("online") ? "离线 · 显示本地保存记录 · " + SessionService.message
+            : !currentThread.optBoolean("writable",true)&&currentThread.optBoolean("ready") ? "已连接 · 此聊天仅可读取"
+            : "active".equals(currentThread.optString("runtimeStatus"))&&!currentThread.optBoolean("ready") ? "已连接 · 电脑正在执行"
             : currentThread.optBoolean("ready") ? (currentThread.optJSONArray("approvals")!=null&&currentThread.optJSONArray("approvals").length()>0?"等待审批":currentThread.optJSONArray("questions")!=null&&currentThread.optJSONArray("questions").length()>0?"等待回复":!MobileState.activeTurnId(currentThread).isEmpty()?"正在处理":"已连接电脑")
             : "已连接 · 历史可读，桌面聊天尚未就绪");
         if (SessionService.message.contains("保存失败")) status.append(" · " + SessionService.message);
@@ -586,8 +588,9 @@ public final class MainActivity extends Activity {
         setButtons(currentThread.optBoolean("ready"));loadModels(false);
         renderRevision++;if(!currentThread.optString("id").equals(displayedChat))deferredRows=null;if(!renderHandler.hasCallbacks(prepareRows))renderHandler.postDelayed(prepareRows,100);
     }
+    private String connectionPresentation(){return UsagePresentation.connection(currentState,currentThread,SessionService.message,isSending(),sendMode());}
     private void updateConnectionDot(){
-        if(connectionDot==null)return;String state=UsagePresentation.connection(currentState,currentThread,SessionService.message);int color;
+        if(connectionDot==null)return;String state=connectionPresentation();int color;
         switch(state){case "connected":color=surface(48,209,88);break;case "busy":color=surface(10,132,255);break;case "error":color=surface(255,69,58);break;case "offline":color=surface(142,142,147);break;default:color=surface(255,159,10);}
         connectionDot.setColor(color);
     }
@@ -603,7 +606,7 @@ public final class MainActivity extends Activity {
     private JSONObject visibleUsage(){return api!=null&&api.fingerprint.equals(SessionService.usageComputer)?SessionService.usage:null;}
     private void updateUsageIndicator(){
         JSONObject value=visibleUsage();boolean online=currentState!=null&&currentState.optBoolean("online");
-        if(usageRings!=null)usageRings.quota(value,online);
+        if(usageRings!=null)usageRings.quota(value,online,"waiting".equals(connectionPresentation()));
         if(usagePrimary!=null&&usagePopup!=null&&usagePopup.isShowing())fillUsageDetails(value,online);
     }
     private String usageLine(JSONObject window,String fallback){
@@ -722,6 +725,7 @@ public final class MainActivity extends Activity {
     }
     private String modelCacheKey(RemoteApi client,String threadId){return client.fingerprint+":"+threadId;}
     private void loadModels(boolean open){
+        if(currentThread!=null&&!currentThread.optBoolean("modelSelectionSupported",true)){if(open)toast("请在电脑端选择模型");return;}
         if(api==null||currentThread==null||currentState==null||!currentState.optBoolean("online")||!currentThread.optBoolean("ready")){if(open)toast("连接电脑并等待聊天就绪后选择模型");return;}
         RemoteApi client=api;String threadId=currentThread.optString("id"),key=modelCacheKey(client,threadId);int epoch=generation;
         JSONObject cached=modelCache.get(key);if(cached!=null&&!currentThread.optString("model").isEmpty())try{cached.put("current",new JSONObject().put("model",currentThread.optString("model")).put("effort",currentThread.optString("reasoningEffort")).put("serviceTier",currentThread.optString("serviceTier","default")));}catch(Exception ignored){}
@@ -745,7 +749,7 @@ public final class MainActivity extends Activity {
     private void modelDialog(){if(!isSending())loadModels(true);}
     private String effortLabel(String value){return ModelPresentation.effort(value);}
     private PowerLabel powerText(String value,int size,int color){PowerLabel label=new PowerLabel(this);label.setText(value);label.setTextSize(size);label.setTextColor(color);label.setPadding(0,dp(7),0,dp(7));return label;}
-    private boolean modelContextValid(String threadId,RemoteApi client,int epoch){return !isDestroyed()&&client==api&&epoch==generation&&threadId.equals(selectedThreadId)&&currentState.optBoolean("online")&&currentThread!=null&&currentThread.optBoolean("ready");}
+    private boolean modelContextValid(String threadId,RemoteApi client,int epoch){return !isDestroyed()&&client==api&&epoch==generation&&threadId.equals(selectedThreadId)&&currentState.optBoolean("online")&&currentThread!=null&&currentThread.optBoolean("ready")&&currentThread.optBoolean("modelSelectionSupported",true);}
     private void applyModel(JSONObject model,String effort,String threadId,RemoteApi client,int epoch){
         if(!modelContextValid(threadId,client,epoch)){toast("聊天或连接已变化，请重新打开模型设置");return;}if(isSending()){toast("正在提交，请稍候");return;}
         try{command(new JSONObject().put("op","model").put("model",model.getString("model")).put("effort",effort),false);}catch(Exception e){toast(error(e));}

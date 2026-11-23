@@ -8,21 +8,21 @@ import org.json.JSONObject;
 
 /** Two compact activity-style rings; only animate when a quota value changes. */
 final class UsageRingsView extends View {
-    static final int OUTER=Color.rgb(48,209,88),INNER=Color.rgb(10,132,255);
+    static final int OUTER=Color.rgb(48,209,88),INNER=Color.rgb(10,132,255),WAITING=Color.rgb(255,159,10);
     private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF bounds=new RectF();
     private float outer=-1,inner=-1,targetOuter=-1,targetInner=-1;
-    private boolean subdued;
+    private boolean subdued,waiting;
     private ValueAnimator animator;
     UsageRingsView(Context context){super(context);setFocusable(true);setClickable(true);paint.setStrokeCap(Paint.Cap.ROUND);setContentDescription("查看剩余额度");}
-    void quota(JSONObject value,boolean online){
+    void quota(JSONObject value,boolean online,boolean waiting){
         float a=UsagePresentation.remaining(value==null?null:value.optJSONObject("primary"));
         float b=UsagePresentation.remaining(value==null?null:value.optJSONObject("secondary"));
         boolean dim=!online||value==null||value.optBoolean("stale");
         String label="额度剩余，外环 "+UsagePresentation.period(value==null?null:value.optJSONObject("primary"),"短周期")+" "+UsagePresentation.percent(value==null?null:value.optJSONObject("primary"))+"，内环 "+UsagePresentation.period(value==null?null:value.optJSONObject("secondary"),"长周期")+" "+UsagePresentation.percent(value==null?null:value.optJSONObject("secondary"));
         setContentDescription(label+(dim?"，非实时数据":"")+"，点按查看详情");
-        if(a==targetOuter&&b==targetInner){if(subdued!=dim){subdued=dim;invalidate();}return;}
-        subdued=dim;targetOuter=a;targetInner=b;if(animator!=null)animator.cancel();
+        if(a==targetOuter&&b==targetInner){if(subdued!=dim||this.waiting!=waiting){subdued=dim;this.waiting=waiting;invalidate();}return;}
+        subdued=dim;this.waiting=waiting;targetOuter=a;targetInner=b;if(animator!=null)animator.cancel();
         if(!isAttachedToWindow()||!ValueAnimator.areAnimatorsEnabled()){outer=a;inner=b;invalidate();return;}
         final float fromA=outer<0?0:outer,fromB=inner<0?0:inner;
         animator=ValueAnimator.ofFloat(0,1);animator.setDuration(420);animator.setInterpolator(new android.view.animation.DecelerateInterpolator());
@@ -37,7 +37,7 @@ final class UsageRingsView extends View {
         if(value>0)canvas.drawArc(bounds,-90,Math.min(360,value*3.6f),false,paint);
     }
     @Override protected void onDraw(Canvas canvas){super.onDraw(canvas);float d=getResources().getDisplayMetrics().density;float radius=Math.min(getWidth(),getHeight())/2f-7*d;
-        ring(canvas,radius,3.5f*d,outer,OUTER);ring(canvas,radius-6*d,3.5f*d,inner,INNER);
+        ring(canvas,radius,3.5f*d,outer,waiting?WAITING:OUTER);ring(canvas,radius-6*d,3.5f*d,inner,INNER);
         if(outer<0&&inner<0){paint.setStyle(Paint.Style.STROKE);paint.setStrokeWidth(1.5f*d);paint.setColor(Color.GRAY);paint.setAlpha(180);canvas.drawLine(getWidth()/2f-2*d,getHeight()/2f,getWidth()/2f+2*d,getHeight()/2f,paint);}
     }
     @Override protected void onDetachedFromWindow(){if(animator!=null)animator.cancel();super.onDetachedFromWindow();}
