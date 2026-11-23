@@ -7,6 +7,12 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { messageInput } from './message-input.mjs';
 
+function hasNativeApprovalDetails(kind, params, item) {
+  if (kind==='command') return typeof (params.command ?? item?.command)==='string' && !!(params.command ?? item?.command).trim();
+  return Array.isArray(item?.changes) && item.changes.length>0 &&
+    item.changes.every(change=>!change.truncated&&typeof change.diff==='string'&&!!change.diff.trim());
+}
+
 export class DesktopBridge extends EventEmitter {
   constructor(threads, { clientFactory = options => new DesktopIpcClient(options), historyReader,backgroundHistoryReader=historyReader, allowSelectedChats = false,chatCreator,autoTitles,openDesktopChat,appTools,phoneModels={},savePhoneModels=async()=>{} } = {}) {
     super();
@@ -479,9 +485,13 @@ export class DesktopBridge extends EventEmitter {
           if(params.itemId&&!(liveTurn.items||[]).some(item=>item.id===params.itemId)&&!nativeApproval)return [];
           const items = getTurns(state).flatMap(turn => turn.items || []);
           const item = items.find(item => item.id === params.itemId);
-          return [{ id, kind, turnId: liveTurn.turnId, decisions: (params.availableDecisions || (nativeApproval ? ['accept', 'decline', 'cancel'] : ['accept', 'cancel'])).filter(value => ['accept', 'decline', 'cancel'].includes(value)),
+          const decisions=params.availableDecisions || (nativeApproval ? ['accept', 'decline', 'cancel'] : ['accept', 'cancel']);
+          const changes=kind==='file' ? item?.changes || [] : [];
+          return [{ id, kind, turnId: liveTurn.turnId,
+            decisions: decisions.filter(value => ['accept', 'decline', 'cancel'].includes(value)&&
+              (value!=='accept'||!nativeApproval||hasNativeApprovalDetails(kind, params, item))),
             command: params.command ?? item?.command ?? null, cwd: params.cwd ?? null,
-            reason: params.reason ?? null, changes: kind === 'file' ? (item?.changes || []) : [],
+            reason: params.reason ?? null, changes,
             submitting: entry.consumed.has(JSON.stringify([getTurns(state).at(-1)?.turnId, id])) }];
         }) };
     });
@@ -582,6 +592,11 @@ export class DesktopBridge extends EventEmitter {
       const type = String(request.type || request.method || '');
       const method = /command/i.test(type) ? 'replyCommandApproval' : /file/i.test(type) ? 'replyFileApproval' : null;
       if (!method) throw new Error('此请求需在桌面处理');
+      if (this.client.sharedOwner && command.decision==='accept' &&
+          !hasNativeApprovalDetails(method==='replyFileApproval'?'file':'command', request.params,
+            active.items?.find(item=>item.id===request.params.itemId))) {
+        throw Error('审批详情尚未同步，请刷新或在桌面处理');
+      }
       // A timeout is uncertain: never automatically replay an approval with a new ID.
       entry.consumed.add(key);
       if (entry.consumed.size > 1000) entry.consumed.delete(entry.consumed.values().next().value);
