@@ -55,7 +55,7 @@ export class HistoryReader {
     this.initialized = true;
   }
   request(method, params) {
-    if (!['initialize', 'thread/list', 'thread/section/move', 'thread/turns/list', 'thread/queue/list', 'thread/queue/add', 'thread/queue/delete', 'skills/list', 'model/list', 'account/rateLimits/read'].includes(method)) throw Error('历史与队列客户端禁止该操作');
+    if (!['initialize', 'thread/list', 'thread/section/move', 'thread/read', 'thread/turns/list', 'thread/queue/list', 'thread/queue/add', 'thread/queue/delete', 'skills/list', 'model/list', 'account/rateLimits/read'].includes(method)) throw Error('历史与队列客户端禁止该操作');
     return new Promise((resolve, reject) => {
       const id = ++this.sequence;
       const timer = setTimeout(() => { this.pending.delete(id); reject(Error('历史读取超时')); }, 15000);
@@ -124,6 +124,12 @@ export class HistoryReader {
     await this.connect();
     const result=await this.request('thread/queue/delete',{threadId,queuedSubmissionId});
     return result?.deleted===true;
+  }
+  async threadModelSettings(threadId) {
+    await this.connect();
+    const {thread} = await this.request('thread/read', {threadId, includeTurns:false});
+    if (thread?.id !== threadId) throw Error('会话设置读取回执不匹配');
+    return {model:thread.model || '', effort:thread.reasoningEffort || ''};
   }
   async models() {
     await this.connect();

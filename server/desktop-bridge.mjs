@@ -294,6 +294,14 @@ export class DesktopBridge extends EventEmitter {
       if(status==='idle'&&!entry.appToolsPending)this.recordSelectionReady(entry);
       if(status&&entry.nativeQueue===undefined)void this.refreshQueue(entry,this.generation);
       if(changed)this.emit('changed');
+      if (['idle','active'].includes(status) && this.historyReader?.threadModelSettings) {
+        const settings = await this.historyReader.threadModelSettings(entry.id).catch(()=>null);
+        if (settings && this.canUseAppTools(entry) &&
+            (settings.model !== entry.appToolsModelSettings?.model || settings.effort !== entry.appToolsModelSettings?.effort)) {
+          entry.appToolsModelSettings = settings;
+          this.emit('changed');
+        }
+      }
       return !!status;
     })();
     entry.appToolsChecking=refresh;
@@ -441,7 +449,7 @@ export class DesktopBridge extends EventEmitter {
       const liveTurn=entry.ready?activeTurn(state):null;
       const appToolsAvailable=this.canUseAppTools(entry)&&!!entry.appToolsStatus;
       const appToolsReady=appToolsAvailable&&entry.appToolsStatus==='idle'&&!entry.appToolsPending;
-      const phoneModel=appToolsAvailable?this.phoneModels.get(entry.id):undefined;
+      const appToolsModel=appToolsAvailable?(this.phoneModels.get(entry.id) ?? entry.appToolsModelSettings):undefined;
       const nativeQueueSupported=this.canUseNativeQueue(entry);
       const summary = summarizeThread(state);
       const turns = new Map((entry.history || []).map(turn => [turn.id, turn]));
@@ -460,7 +468,7 @@ export class DesktopBridge extends EventEmitter {
         ...(appToolsAvailable?{attachmentsSupported:nativeQueueSupported,nativeQueueSupported,modelSelectionSupported:this.canChooseAppToolsModel(entry)}:{}),
         queueSupported:appToolsAvailable||this.client?.sharedOwner?nativeQueueSupported:!!this.historyReader?.queuedMessages,
         queuedMessages:(entry.nativeQueue||[]).slice(0,100).map(message=>({id:message.id,text:String(message.prompt||message.text||message.context?.prompt||[...message.context?.fileAttachments||[],...message.context?.imageAttachments||[]].map(row=>row.label||row.filename||'附件').join('、')).slice(0,16000),status:message.submission?.status||'queued',...(appToolsAvailable||this.client?.sharedOwner?{removable:nativeQueueSupported&&message.serverQueue===true}:{})})),
-        model: phoneModel?.model || state?.latestThreadSettings?.model || state?.latestModel || entry.modelSettings?.model || '', reasoningEffort:phoneModel?.effort || state?.latestReasoningEffort || state?.latestThreadSettings?.effort || entry.modelSettings?.reasoningEffort || '',
+        model: appToolsModel?.model || state?.latestThreadSettings?.model || state?.latestModel || entry.modelSettings?.model || '', reasoningEffort:appToolsModel?.effort || state?.latestReasoningEffort || state?.latestThreadSettings?.effort || entry.modelSettings?.reasoningEffort || '',
         serviceTier:state?.latestThreadSettings?.serviceTier??'default',
         activity: entry.ready ? summary.activity : undefined,
         writable: !!entry.writable, historyReady: !!entry.historyReady,
@@ -654,7 +662,7 @@ export class DesktopBridge extends EventEmitter {
     if(usingAppTools){
       // The desktop tool supports per-message overrides; service tier is set by the desktop itself.
       const models=this.modelCatalog.map(row=>({...row,serviceTiers:[]}));
-      const current=this.phoneModels.get(threadId)||{model:'',effort:'',serviceTier:'default'};
+      const current={model:'',effort:'',serviceTier:'default',...(this.phoneModels.get(threadId)??entry.appToolsModelSettings)};
       return {models,current};
     }
     entry.modelSettings=await this.client.readModelSettings(threadId,entry.owner);

@@ -50,7 +50,20 @@ export function groupThreads(threads, state = {}) {
   const normalized = value => String(value || '').replaceAll('\\', '/').replace(/\/$/, '').toLowerCase();
   const result = threads.map((thread, index) => {
     const assigned = assignments[thread.id];
-    const project = projects.find(p => p.id === (assigned?.projectId || thread.projectId)) || (!projectless.has(thread.id) && !assigned && projects.filter(p => (p.rootPaths || []).some(root => normalized(thread.cwd) === normalized(root) || normalized(thread.cwd).startsWith(normalized(root) + '/'))).sort((a,b) => Math.max(...b.rootPaths.map(x=>x.length))-Math.max(...a.rootPaths.map(x=>x.length)))[0]);
+    let project = projects.find(p => p.id === (assigned?.projectId || thread.projectId));
+    if (!project && !projectless.has(thread.id) && !assigned) {
+      const cwd = normalized(thread.cwd);
+      let longestMatch = 0;
+      for (const candidate of projects) {
+        for (const root of candidate.rootPaths || []) {
+          const folder = normalized(root);
+          if (folder.length > longestMatch && (cwd === folder || cwd.startsWith(folder + '/'))) {
+            project = candidate;
+            longestMatch = folder.length;
+          }
+        }
+      }
+    }
     const section = thread.section;
     const pinIndex=pinned.indexOf(thread.id),isPinned=pinIndex>=0||(!state._desktopPinnedIds&&section?.id===PINNED_SECTION_ID);
     const projectPinIndex=project?pinnedProjects.indexOf(project.id):-1;
