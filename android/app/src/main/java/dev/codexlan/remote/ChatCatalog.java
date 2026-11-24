@@ -4,6 +4,12 @@ import org.json.*;
 import java.util.*;
 
 final class ChatCatalog {
+    private static final String[] ROW_FIELDS = {
+        "id", "name", "groupId", "groupName", "groupOrder", "order",
+        "pinned", "projectPinned", "unread", "ready", "historyReady"
+    };
+
+
     static List<JSONObject> rows(JSONObject state) throws Exception {
         LinkedHashMap<String,JSONObject> rows=new LinkedHashMap<>();
         Map<String,JSONObject> catalogGroups=new HashMap<>();
@@ -14,7 +20,7 @@ final class ChatCatalog {
                 String groupId=next.optString("groupId","chats");
                 if(key.equals("catalog")&&next.has("groupOrder"))catalogGroups.putIfAbsent(groupId,next);
                 if(row==null){
-                    row=new JSONObject(next.toString());
+                    row=new JSONObject(next,ROW_FIELDS);
                     JSONObject group=catalogGroups.get(groupId);
                     // A live-only row can carry an older rank for a group still in the catalog.
                     if(key.equals("threads")&&group!=null){
