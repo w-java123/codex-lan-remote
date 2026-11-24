@@ -77,6 +77,7 @@ public final class MainActivity extends Activity {
     private TextView modelChoice,latestJump;
     private ConversationRail jumpRail;
     private PopupWindow railPreview,modelPopup;
+    private final java.util.Map<String,JSONObject> pendingModels=new java.util.HashMap<>();
     private final java.util.Map<String,JSONObject> modelCache=new java.util.LinkedHashMap<>();
     private final java.util.Map<String,Long> modelCacheAt=new java.util.HashMap<>();
     private static final class ModelLoad {final RemoteApi client;final int epoch;ModelLoad(RemoteApi client,int epoch){this.client=client;this.epoch=epoch;}}
@@ -501,14 +502,19 @@ public final class MainActivity extends Activity {
         try { command(new JSONObject().put("op", operation).put("text", value), true); } catch (Exception e) { toast(error(e)); }
     }
     private void command(JSONObject payload, boolean clearComposer){command(payload,clearComposer,null);}
-    private void command(JSONObject payload, boolean clearComposer,Runnable confirmed){command(payload,clearComposer,confirmed,null);}
-    private void command(JSONObject payload, boolean clearComposer,Runnable confirmed,Runnable failed) {
+    private void command(JSONObject payload, boolean clearComposer,Runnable confirmed) {
         if (currentThread == null || api == null || isSending()) return;
         try { if (!payload.has("threadId")) payload.put("threadId", currentThread.getString("id")); } catch (Exception e) { return; }
         RemoteApi client = api; int epoch = generation; String textBefore = composer.getText().toString();
         String id=UUID.randomUUID().toString(),chat=payload.optString("threadId");
-        String filesKey=client.fingerprint+":"+chat;
+        String filesKey=modelCacheKey(client,chat);
         java.util.List<PhoneAttachments.Item> files=clearComposer?phoneAttachments.snapshot(filesKey):java.util.Collections.emptyList();
+        String operation=payload.optString("op");
+        // The App Tools queue runs with the desktop session settings, and a steer keeps the active model.
+        boolean appToolsQueue=currentThread.has("modelSelectionSupported")
+            &&("queue".equals(operation)||!files.isEmpty()||payload.optString("text").trim().startsWith("/"));
+        JSONObject modelChoiceToSend=clearComposer&&!appToolsQueue&&("start".equals(operation)||"queue".equals(operation))
+            ?pendingModels.get(filesKey):null;
         final java.util.Set<String> before;try{before=new java.util.HashSet<>(SentMessages.users(currentThread).keySet());}catch(Exception e){return;}
         if(!commands.begin(chat,id))return;setButtons(false);RemoteApi channel=client.readChannel();commandChannels.put(id,channel);
         worker.execute(() -> {
@@ -519,16 +525,33 @@ public final class MainActivity extends Activity {
                     payload.put("attachmentIds",ids);
                     if(epoch!=generation||client!=api||Thread.currentThread().isInterrupted())throw new Exception("连接已切换，附件保留在草稿中，请确认后再发送");
                 }
+                if(modelChoiceToSend!=null){
+                    JSONObject modelCommand=new JSONObject(modelChoiceToSend.toString()).put("op","model").put("threadId",chat);
+                    channel.call("POST","/v1/command",modelCommand,UUID.randomUUID().toString());
+                    runOnUiThread(()->{
+                        if(epoch!=generation||client!=api||!pendingModels.remove(filesKey,modelChoiceToSend))return;
+                        try{
+                            JSONObject cached=modelCache.get(filesKey);
+                            if(cached!=null)cached.put("current",modelChoiceToSend);
+                            if(currentThread!=null&&chat.equals(currentThread.optString("id"))){
+                                currentThread.put("model",modelChoiceToSend.getString("model"))
+                                    .put("reasoningEffort",modelChoiceToSend.getString("effort"))
+                                    .put("serviceTier",modelChoiceToSend.getString("serviceTier"));
+                                updateModelChoice();
+                            }
+                        }catch(org.json.JSONException ignored){}
+                    });
+                    if(epoch!=generation||client!=api||Thread.currentThread().isInterrupted())return;
+                }
                 JSONObject result=channel.call("POST", "/v1/command", payload, id);
                 runOnUiThread(() -> { if (epoch == generation && client == api) {
                     phoneAttachments.accepted(filesKey,files);renderAttachments();
                     if(clearComposer&&!result.optBoolean("queued")&&("start".equals(payload.optString("op"))||"steer".equals(payload.optString("op")))){sentMessages.accepted(chat,id,payload.optString("text"),before);if(chat.equals(selectedThreadId)){renderRevision++;scheduleRows();}}
                     if (clearComposer && payload.optString("threadId").equals(selectedThreadId) && composer.getText().toString().equals(textBefore)) { composer.setText(""); drafts.remove(selectedThreadId); }
-                    if("model".equals(payload.optString("op"))){JSONObject cached=modelCache.get(modelCacheKey(client,payload.optString("threadId")));if(cached!=null)try{cached.put("current",new JSONObject().put("model",payload.optString("model")).put("effort",payload.optString("effort")).put("serviceTier",payload.optString("serviceTier",cached.optJSONObject("current")==null?"default":cached.optJSONObject("current").optString("serviceTier","default"))));}catch(Exception ignored){}}
                     if(result.optBoolean("nativeQueue"))toast("已加入桌面队列，将使用桌面会话的模型设置");
                     if(confirmed!=null)confirmed.run();
                 } });
-            } catch (Exception e) { runOnUiThread(() -> { if (epoch == generation && client == api){if(failed!=null)failed.run();toast("提交未确认，请检查聊天状态后再操作：" + error(e));} }); }
+            } catch (Exception e) { runOnUiThread(() -> { if (epoch == generation && client == api){toast("提交未确认，请检查聊天状态后再操作：" + error(e));} }); }
             finally { channel.cancel();runOnUiThread(() -> {commandChannels.remove(id);commands.finish(chat,id);if(epoch==generation&&client==api)setButtons(currentThread!=null&&currentThread.optBoolean("ready"));}); }
         });
     }
@@ -593,7 +616,7 @@ public final class MainActivity extends Activity {
             : "已连接 · 历史可读，桌面聊天尚未就绪");
         if (SessionService.message.contains("保存失败")) status.append(" · " + SessionService.message);
         status.append(" · "+networkModeLabel());
-        String selectedModel=currentThread.optString("model"),effort=currentThread.optString("reasoningEffort");((PowerLabel)modelChoice).power("ultra".equals(effort),"priority".equals(currentThread.optString("serviceTier")));modelChoice.setText(selectedModel.isEmpty()?"选择模型  ⌄":ModelPresentation.name(selectedModel)+(effort.isEmpty()?"":" · "+effortLabel(effort))+"  ⌄");
+        updateModelChoice();
         setButtons(currentThread.optBoolean("ready"));loadModels(false);
         renderRevision++;if(!currentThread.optString("id").equals(displayedChat))deferredRows=null;if(!renderHandler.hasCallbacks(prepareRows))renderHandler.postDelayed(prepareRows,100);
     }
@@ -762,22 +785,42 @@ public final class MainActivity extends Activity {
     private void modelDialog(){if(!isSending())loadModels(true);}
     private String effortLabel(String value){return ModelPresentation.effort(value);}
     private PowerLabel powerText(String value,int size,int color){PowerLabel label=new PowerLabel(this);label.setText(value);label.setTextSize(size);label.setTextColor(color);label.setPadding(0,dp(7),0,dp(7));return label;}
-    private boolean modelContextValid(String threadId,RemoteApi client,int epoch){return !isDestroyed()&&client==api&&epoch==generation&&threadId.equals(selectedThreadId)&&currentState.optBoolean("online")&&modelReady();}
-    private void applyModel(JSONObject model,String effort,String threadId,RemoteApi client,int epoch){
-        if(!modelContextValid(threadId,client,epoch)){toast("聊天或连接已变化，请重新打开模型设置");return;}if(isSending()){toast("正在提交，请稍候");return;}
-        try{command(new JSONObject().put("op","model").put("model",model.getString("model")).put("effort",effort),false);}catch(Exception e){toast(error(e));}
+    private void updateModelChoice(){
+        if(modelChoice==null||currentThread==null||api==null)return;
+        JSONObject choice=pendingModels.get(modelCacheKey(api,currentThread.optString("id")));
+        String model=choice==null?currentThread.optString("model"):choice.optString("model");
+        String effort=choice==null?currentThread.optString("reasoningEffort"):choice.optString("effort");
+        String tier=choice==null?currentThread.optString("serviceTier"):choice.optString("serviceTier");
+        ((PowerLabel)modelChoice).power("ultra".equals(effort),"priority".equals(tier));
+        modelChoice.setText(model.isEmpty()?"选择模型  ⌄":ModelPresentation.name(model)+(effort.isEmpty()?"":" · "+effortLabel(effort))+"  ⌄");
+    }
+    private boolean modelContextValid(String threadId,RemoteApi client,int epoch){return !isDestroyed()&&client==api&&epoch==generation&&threadId.equals(selectedThreadId)&&currentState!=null&&currentState.optBoolean("online")&&modelReady();}
+    private boolean stageModel(String model,String effort,String tier,String threadId,RemoteApi client,int epoch){
+        if(!modelContextValid(threadId,client,epoch)||isSending())return false;
+        String key=modelCacheKey(client,threadId);
+        if(model.equals(currentThread.optString("model"))&&effort.equals(currentThread.optString("reasoningEffort"))
+            &&tier.equals(currentThread.optString("serviceTier","default"))){
+            pendingModels.remove(key);
+        }else{
+            try{pendingModels.put(key,new JSONObject().put("model",model).put("effort",effort).put("serviceTier",tier));}
+            catch(org.json.JSONException e){return false;}
+        }
+        updateModelChoice();
+        return true;
     }
     private void dismissModelPopup(){if(modelPopup!=null){modelPopup.dismiss();modelPopup=null;}}
     private void showModelMenu(JSONArray models,JSONObject supplied,String threadId,RemoteApi client,int epoch){
-        JSONObject selected=models.optJSONObject(0);for(int i=0;i<models.length();i++){JSONObject candidate=models.optJSONObject(i);if(supplied!=null&&candidate.optString("model").equals(supplied.optString("model")))selected=candidate;}
-        final JSONObject model=selected;final JSONObject current=supplied==null?new JSONObject():supplied;
+        JSONObject pending=pendingModels.get(modelCacheKey(client,threadId));
+        JSONObject current=pending!=null?pending:supplied==null?new JSONObject():supplied;
+        JSONObject selected=models.optJSONObject(0);for(int i=0;i<models.length();i++){JSONObject candidate=models.optJSONObject(i);if(candidate.optString("model").equals(current.optString("model")))selected=candidate;}
+        final JSONObject model=selected;
         JSONArray available=model.optJSONArray("efforts");if(available==null||available.length()==0){toast("此模型未提供思考强度");return;}
         final JSONArray efforts=ModelPresentation.sliderEfforts(available,current.optString("effort"));
         String effort=current.optString("effort",model.optString("defaultEffort"));int initial=0;for(int i=0;i<efforts.length();i++)if(efforts.optString(i).equals(effort))initial=i;
         dismissModelPopup();LinearLayout panel=vertical();panel.setPadding(dp(12),dp(4),dp(12),dp(6));GradientDrawable background=rounded(surface(42,42,42),22);background.setStroke(dp(1),surface(65,65,65));panel.setBackground(background);
         LinearLayout heading=new LinearLayout(this);heading.setGravity(android.view.Gravity.CENTER_VERTICAL);
         JSONObject fastOption=null;JSONArray tiers=model.optJSONArray("serviceTiers");if(tiers!=null)for(int i=0;i<tiers.length();i++)if("priority".equals(tiers.optJSONObject(i).optString("id")))fastOption=tiers.optJSONObject(i);final JSONObject fastTier=fastOption;
-        final boolean[] fast={"priority".equals(current.optString("serviceTier"))},pending={false};final int[] confirmed={initial};
+        final boolean[] fast={"priority".equals(current.optString("serviceTier"))};final int[] confirmed={initial};
         ImageView lightning=new ImageView(this);lightning.setPadding(dp(8),dp(8),dp(8),dp(8));heading.addView(lightning,new LinearLayout.LayoutParams(dp(34),dp(34)));lightning.setEnabled(fastTier!=null);
         TextView strength=text(effortLabel(efforts.optString(initial)),16,surface(65,137,251));strength.setGravity(android.view.Gravity.CENTER);strength.setTextIsSelectable(false);strength.setPadding(0,0,0,0);heading.addView(strength,new LinearLayout.LayoutParams(0,dp(34),1));
         ImageView reset=new ImageView(this);reset.setImageDrawable(new UiIcon("reset",muted));reset.setPadding(dp(8),dp(8),dp(8),dp(8));reset.setContentDescription("恢复默认推理强度");heading.addView(reset,new LinearLayout.LayoutParams(dp(34),dp(34)));panel.addView(heading);
@@ -786,16 +829,19 @@ public final class MainActivity extends Activity {
         Runnable style=()->{
             boolean ultra="ultra".equals(efforts.optString(sliderView[0]==null?confirmed[0]:sliderView[0].getProgress()));
             strength.setTextColor(ultra?surface(176,121,255):surface(65,137,251));
-            lightning.setImageDrawable(new UiIcon(fast[0]?"bolt-filled":"bolt",fast[0]?(ultra?surface(174,116,255):surface(85,155,255)):muted));lightning.setBackground(rounded(fast[0]?surface(59,59,59):Color.TRANSPARENT,10));lightning.setAlpha(fastTier==null?.35f:pending[0]?.55f:1f);lightning.setContentDescription(fastTier==null?"此模型未提供快速模式":fast[0]?"快速模式已开启，点按切换标准模式，用量更多":"标准模式，点按启用快速模式，用量更多");
+            lightning.setImageDrawable(new UiIcon(fast[0]?"bolt-filled":"bolt",fast[0]?(ultra?surface(174,116,255):surface(85,155,255)):muted));lightning.setBackground(rounded(fast[0]?surface(59,59,59):Color.TRANSPARENT,10));lightning.setAlpha(fastTier==null?.35f:1f);lightning.setContentDescription(fastTier==null?"此模型未提供快速模式":fast[0]?"快速模式已开启，点按切换标准模式，用量更多":"标准模式，点按启用快速模式，用量更多");
             if(sliderView[0]!=null){sliderView[0].ultra(ultra);sliderView[0].fast(fast[0]);}
         };
         java.util.function.BiConsumer<Integer,String> submit=(index,tier)->{
-            if(pending[0]||isSending()||!modelContextValid(threadId,client,epoch))return;
-            try{JSONObject payload=new JSONObject().put("op","model").put("threadId",threadId).put("model",model.getString("model")).put("effort",efforts.optString(index));if(tier!=null)payload.put("serviceTier",tier);
-                pending[0]=true;sliderView[0].setEnabled(false);lightning.setEnabled(false);reset.setEnabled(false);modelName.setEnabled(false);style.run();
-                Runnable enable=()->{pending[0]=false;sliderView[0].setEnabled(efforts.length()>1);lightning.setEnabled(fastTier!=null);reset.setEnabled(true);modelName.setEnabled(true);style.run();};
-                command(payload,false,()->{confirmed[0]=index;if(tier!=null)fast[0]="priority".equals(tier);try{current.put("model",model.getString("model")).put("effort",efforts.optString(index)).put("serviceTier",fast[0]?"priority":"default");}catch(Exception ignored){}enable.run();},()->{sliderView[0].setProgress(confirmed[0]);strength.setText(effortLabel(efforts.optString(confirmed[0])));enable.run();});
-            }catch(Exception e){toast(error(e));}
+            boolean fastEnabled=tier==null?fast[0]:"priority".equals(tier);
+            if(stageModel(model.optString("model"),efforts.optString(index),fastEnabled?"priority":"default",threadId,client,epoch)){
+                confirmed[0]=index;
+                fast[0]=fastEnabled;
+            }else{
+                sliderView[0].setProgress(confirmed[0]);
+                strength.setText(effortLabel(efforts.optString(confirmed[0])));
+            }
+            style.run();
         };
         EffortSlider slider=new EffortSlider(this,efforts.length(),initial,new EffortSlider.Listener(){
             public void preview(int index){strength.setText(effortLabel(efforts.optString(index)));style.run();}
@@ -803,7 +849,7 @@ public final class MainActivity extends Activity {
         });sliderView[0]=slider;panel.addView(slider,new LinearLayout.LayoutParams(-1,dp(46)));style.run();
         lightning.setOnClickListener(v->{if(fastTier!=null)submit.accept(confirmed[0],fast[0]?"default":"priority");});
         reset.setOnClickListener(v->{String defaultEffort=model.optString("defaultEffort");for(int i=0;i<efforts.length();i++)if(efforts.optString(i).equals(defaultEffort)){slider.setProgress(i);if(i!=confirmed[0])submit.accept(i,null);return;}});
-        modelName.setOnClickListener(v->{dismissModelPopup();showModelPicker(models,current,threadId,client,epoch);});
+        modelName.setOnClickListener(v->{dismissModelPopup();showModelPicker(models,pendingModels.getOrDefault(modelCacheKey(client,threadId),supplied),threadId,client,epoch);});
         modelPopup=AnchoredMenu.show(this,modelChoice,panel,dp(320),false);
     }
     private void showModelPicker(JSONArray models,JSONObject current,String threadId,RemoteApi client,int epoch){
@@ -813,7 +859,19 @@ public final class MainActivity extends Activity {
         for(int i=0;i<models.length();i++){
             JSONObject model=models.optJSONObject(i);boolean selected=current!=null&&model.optString("model").equals(current.optString("model"));LinearLayout row=new LinearLayout(this);row.setGravity(android.view.Gravity.CENTER_VERTICAL);row.setPadding(0,0,0,0);
             TextView name=text(ModelPresentation.name(model.optString("displayName",model.optString("model"))),15,foreground);name.setTextIsSelectable(false);row.addView(name,new LinearLayout.LayoutParams(0,dp(36),1));TextView check=text(selected?"✓":"",17,foreground);check.setTextIsSelectable(false);check.setGravity(android.view.Gravity.CENTER);row.addView(check,new LinearLayout.LayoutParams(dp(24),dp(36)));row.setContentDescription("选择模型 "+name.getText()+(selected?"，当前模型":""));
-            row.setOnClickListener(v->{menu[0].dismiss();if(selected)showModelMenu(models,current,threadId,client,epoch);else applyModel(model,model.optString("defaultEffort"),threadId,client,epoch);});rows.addView(row);
+            row.setOnClickListener(v->{
+                menu[0].dismiss();
+                if(selected){showModelMenu(models,current,threadId,client,epoch);return;}
+                String tier="default";
+                JSONArray tiers=model.optJSONArray("serviceTiers");
+                if(current!=null&&"priority".equals(current.optString("serviceTier"))&&tiers!=null){
+                    for(int option=0;option<tiers.length();option++){
+                        JSONObject candidate=tiers.optJSONObject(option);
+                        if(candidate!=null&&"priority".equals(candidate.optString("id"))){tier="priority";break;}
+                    }
+                }
+                stageModel(model.optString("model"),model.optString("defaultEffort"),tier,threadId,client,epoch);
+            });rows.addView(row);
         }
         panel.addView(options,new LinearLayout.LayoutParams(-1,Math.min(dp(models.length()*36),(int)(getResources().getDisplayMetrics().heightPixels*.55))));menu[0]=AnchoredMenu.show(this,modelChoice,panel,dp(320),false);modelPopup=menu[0];
     }
@@ -1153,7 +1211,7 @@ public final class MainActivity extends Activity {
         items.addView(text("关于",13,muted));items.addView(text("Codex LAN · "+appVersion()+"\n非官方远控客户端",14,muted));
           settingRow(items,"检测更新","主／次版本提醒、GitHub 下载与电脑插件更新",appUpdates::open);
         settingRow(items,"清除本机配对","删除本机连接信息，重新配对电脑",()->new AlertDialog.Builder(this).setTitle("清除本机配对？").setMessage("手机上的连接信息将删除。电脑端的授权记录仍需在电脑撤销；EasyTier 配置保留。")
-            .setNegativeButton("返回",null).setPositiveButton("清除",(d,w)->{generation++;api.cancel();stopService(new android.content.Intent(this,SessionService.class));SessionService.latest=null;api=null;currentState=null;selectedThreadId="";drafts.clear();storage.clear();dialog.dismiss();connectionPage();}).show());
+            .setNegativeButton("返回",null).setPositiveButton("清除",(d,w)->{generation++;api.cancel();stopService(new android.content.Intent(this,SessionService.class));SessionService.latest=null;api=null;currentState=null;selectedThreadId="";drafts.clear();pendingModels.clear();storage.clear();dialog.dismiss();connectionPage();}).show());
         android.os.Handler refresh=new android.os.Handler(getMainLooper());Runnable networkRefresh=new Runnable(){public void run(){networkHint.setText(EasyTierVpnService.state);if(dialog.isShowing())refresh.postDelayed(this,1000);}};dialog.setOnDismissListener(d->refresh.removeCallbacks(networkRefresh));
         dialog.show();dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent);dialog.getWindow().setLayout(-1,-1);refresh.post(networkRefresh);
     }
