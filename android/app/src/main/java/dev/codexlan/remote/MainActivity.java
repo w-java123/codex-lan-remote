@@ -564,11 +564,13 @@ public final class MainActivity extends Activity {
     private void render(JSONObject state) throws Exception {
         if(connectionGuideVisible){currentState=state;return;}
         currentState = state;
+        String previousSelection = selectedThreadId;
         if(!selectedThreadId.isEmpty()&&selectedThreadId.equals(state.optString("recoveredSelectionFrom"))){drafts.put(selectedThreadId,composer==null?"":composer.getText().toString());selectedThreadId=state.optString("selectedThreadId");if(composer!=null)composer.setText(drafts.containsKey(selectedThreadId)?drafts.get(selectedThreadId):"");}
         if(appUpdates!=null&&api!=null&&state.optBoolean("online"))appUpdates.desktop(state.optString("desktopVersion"),api.fingerprint);
         JSONArray threads = state.optJSONArray("threads"); if (threads == null) threads = new JSONArray();
         if (selectedThreadId.isEmpty()) selectedThreadId = state.optString("selectedThreadId");
         if (selectedThreadId.isEmpty() && threads.length() > 0 && state.optString("recoveredSelectionFrom").isEmpty()) selectedThreadId = threads.getJSONObject(0).getString("id");
+        if (!selectedThreadId.equals(previousSelection)) rememberSelectedThread();
         currentThread = null;
         for (int i = 0; i < threads.length(); i++) if (threads.getJSONObject(i).getString("id").equals(selectedThreadId)) currentThread = threads.getJSONObject(i);
         if(currentThread!=null){
@@ -1022,9 +1024,19 @@ public final class MainActivity extends Activity {
         if(request==206){restoreVpnPermission=false;if(result==RESULT_OK)startForegroundService(new android.content.Intent(this,EasyTierVpnService.class));else toast("VPN 未授权，可在 EasyTier 设置中重新连接");return;}
         if (request == 200) { if (result == RESULT_OK) startEasyTier(); else toast("未授予 VPN 权限"); }
     }
+    private void rememberSelectedThread() {
+        if (api == null || selectedThreadId.isEmpty()) return;
+        android.content.SharedPreferences preferences = getPreferences(MODE_PRIVATE);
+        String key = "selected:" + api.fingerprint;
+        if (!selectedThreadId.equals(preferences.getString(key, ""))) {
+            preferences.edit().putString(key, selectedThreadId).apply();
+        }
+    }
+
     private void beginPolling() { beginPolling(false); }
     private void beginPolling(boolean refresh) {
         if (api == null) return;
+        rememberSelectedThread();
         try {
             android.content.Intent intent = new android.content.Intent(this, SessionService.class);
             if (refresh) intent.setAction("refresh");
@@ -1245,7 +1257,7 @@ public final class MainActivity extends Activity {
         if(root!=null)root.requestFocus();super.onPause();
     }
     @Override protected void onPostResume(){super.onPostResume();getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE|android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);if(root!=null)root.requestFocus();}
-    @Override protected void onStop() { cancelVoice();renderHandler.removeCallbacks(themeClock);if(!restoreVpnPermission)networkRestoreAttempted=false;visible = false; generation++;modelOpenWanted="";modelLoading.clear(); unregisterReceiver(updates); if (api != null) { getPreferences(MODE_PRIVATE).edit().putString("selected:" + api.fingerprint,selectedThreadId).apply(); api.cancel(); } commands.clear();for(RemoteApi channel:commandChannels.values())channel.cancel();commandChannels.clear(); dismissRailPreview();dismissModelPopup();if(usagePopup!=null)usagePopup.dismiss();if(jumpRail!=null)jumpRail.cancel();super.onStop(); }
+    @Override protected void onStop() { cancelVoice();renderHandler.removeCallbacks(themeClock);if(!restoreVpnPermission)networkRestoreAttempted=false;visible = false; generation++;modelOpenWanted="";modelLoading.clear(); unregisterReceiver(updates); if (api != null) { api.cancel(); } commands.clear();for(RemoteApi channel:commandChannels.values())channel.cancel();commandChannels.clear(); dismissRailPreview();dismissModelPopup();if(usagePopup!=null)usagePopup.dismiss();if(jumpRail!=null)jumpRail.cancel();super.onStop(); }
     @Override public void onWindowFocusChanged(boolean focused){super.onWindowFocusChanged(focused);if(focused&&appUpdates!=null)appUpdates.focus();}
     @Override public void startActivityForResult(android.content.Intent intent,int request,Bundle options){if(appUpdates!=null)appUpdates.external();try{super.startActivityForResult(intent,request,options);}catch(RuntimeException e){if(appUpdates!=null)appUpdates.navigationFailed();throw e;}}
     @Override protected void onDestroy() { cancelVoice();if(speechInput!=null)speechInput.destroy();if(voiceModels!=null)voiceModels.close();generation++;renderRevision++;renderHandler.removeCallbacks(prepareRows);renderHandler.removeCallbacks(flushRows);renderWorker.shutdownNow();chatFiles.close();if(appUpdates!=null)appUpdates.close(); if (api != null) api.cancel(); worker.shutdownNow(); super.onDestroy(); }
