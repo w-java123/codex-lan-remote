@@ -28,7 +28,7 @@ async function acquireLock(lock) {
     if (error.code !== 'EEXIST') throw error;
     const pid = Number(await readFile(file, 'utf8').catch(() => '0'));
     const serverPid = Number(await readFile(join(lock, 'backend.pid'), 'utf8').catch(() => '0'));
-    if (!pid || alive(pid) || alive(serverPid)) throw Error('共享桌面正在运行或启动，请先检查该窗口');
+    if (!pid || alive(pid) || alive(serverPid)) return false;
     await rm(file, { force: true });
     await rm(join(lock, 'backend.pid'), { force: true });
     await rm(join(lock, 'token.local'), { force: true });
@@ -36,6 +36,7 @@ async function acquireLock(lock) {
     await mkdir(lock);
   }
   await writeFile(file, String(process.pid), { flag: 'wx' });
+  return true;
 }
 
 function relayConnection(request, socket, data, { route, port, token, onAttach, onDetach }) {
@@ -82,13 +83,16 @@ function relayConnection(request, socket, data, { route, port, token, onAttach, 
   upstream.pipe(socket);
 }
 
-export async function runSharedOwner({ dataDirectory, desktop, binary, env = process.env }) {
+export async function runSharedOwner({ dataDirectory, desktop, binary, env = process.env, onReady = () => {}, ignoreAlreadyRunning = true }) {
   const lock = join(dataDirectory, 'shared-owner.lock');
   const manifest = join(dataDirectory, 'shared-owner.local.json');
-  await acquireLock(lock);
+  if (!await acquireLock(lock)) {
+    if (ignoreAlreadyRunning) return false;
+    throw Error('共享桌面正在运行或启动，请先检查该窗口');
+  }
   const token = randomBytes(32).toString('hex');
   const route = '/rpc/' + randomBytes(32).toString('hex');
-  let backend, gui, relay;
+  let backend, gui, relay, attached = false;
   let desktops = 0, leaseWrite = Promise.resolve(), closing = false;
   const connections = new Set();
   try {
@@ -137,13 +141,17 @@ export async function runSharedOwner({ dataDirectory, desktop, binary, env = pro
     gui = spawn(desktop, desktopArgs, { cwd: dirname(desktop), env: childEnv, windowsHide: false, stdio: 'ignore' });
     const guiExit = once(gui, 'exit');
     guiExit.catch(() => {});
-    for (let i = 0; i < 120 && !desktops && gui.exitCode === null && backend.exitCode === null; i++) await delay(250);
+    for (let i = 0; i < 240 && !desktops && gui.exitCode === null && backend.exitCode === null; i++) await delay(250);
     if (!desktops) throw Error('桌面未连接共享 App Server，请关闭这个测试窗口后按原方式打开 Codex');
+    attached = true;
     await leaseWrite;
+    await onReady();
     console.log('Codex 桌面共享控制已连接');
     await Promise.race([guiExit, backendExit]);
   } finally {
     closing = true;
+    // Dispose only our startup window before closing its relay if it never attached.
+    if (!attached && gui?.pid && gui.exitCode === null) gui.kill();
     for (const socket of connections) socket.destroy();
     relay?.close();
     await leaseWrite.catch(() => {});
@@ -159,7 +167,7 @@ export async function runSharedOwner({ dataDirectory, desktop, binary, env = pro
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [dataDirectory, desktop, binary] = process.argv.slice(2);
-  await runSharedOwner({ dataDirectory, desktop, binary }).catch(error => {
+  await runSharedOwner({ dataDirectory, desktop, binary, ignoreAlreadyRunning:false }).catch(error => {
     console.error(error.message);
     process.exitCode = 1;
   });

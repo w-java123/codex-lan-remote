@@ -16,5 +16,13 @@ export async function startBackgroundTask(root) {
   if (process.platform !== 'win32') return false;
   const state = await readJson(join(root, 'autostart.local.json'), null);
   if (state?.kind !== 'windows-task' || state.configured !== true) return false;
-  try { await invoke(root, ['-StartOnly']); return true; } catch { return false; }
+  try {
+    if (typeof state.taskName === 'string' && /^Codex LAN Remote-S-1-(?:\d+-)+\d+-[0-9a-f]{12}$/i.test(state.taskName)) {
+      await run(join(process.env.SystemRoot || 'C:/Windows', 'System32/schtasks.exe'),
+        ['/Run', '/TN', state.taskName], {windowsHide:true, timeout:10000, maxBuffer:65536});
+    } else {
+      await invoke(root, ['-StartOnly']);
+    }
+    return true;
+  } catch { return false; }
 }

@@ -80,8 +80,22 @@ if ($StartOnly) {
 }
 $taskConfig = Get-Content -LiteralPath (Join-Path $taskFullRoot 'config.local.json') -Raw | ConvertFrom-Json
 $taskMetadata = Join-Path $taskFullRoot 'autostart.local.json'
+$taskShared = Join-Path $taskPlugin 'runtime\CodexLanSharedLaunch.exe'
+$taskStartupName = 'Codex 手机共享控制'
+$taskDefaultRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'CodexLAN')).TrimEnd('\')
+if ($taskVirtualRoot -ne $taskDefaultRoot) { $taskStartupName += ' ' + $taskSuffix }
+$taskStartupRoot = [Environment]::GetFolderPath('Startup')
+$taskStartupPath = Join-Path $taskStartupRoot ($taskStartupName + '.lnk')
+$taskShell = New-Object -ComObject WScript.Shell
+if (Test-Path -LiteralPath $taskStartupPath) {
+    $taskPriorLink = $taskShell.CreateShortcut($taskStartupPath)
+    if ([IO.Path]::GetFileName($taskPriorLink.TargetPath) -ne 'CodexLanSharedLaunch.exe') {
+        throw '同名 Windows 启动应用不属于本插件，未修改'
+    }
+}
 if ($taskConfig.autoStart -cne $true) {
-    # Unregistering prevents future launches; do not terminate a current connection.
+    # Remove the login entry and leave any running connection alone.
+    if (Test-Path -LiteralPath $taskStartupPath) { Remove-Item -LiteralPath $taskStartupPath }
     if ($taskPrior) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false }
     if ($taskOld) { Unregister-ScheduledTask -TaskName $taskOldName -Confirm:$false }
     [IO.File]::WriteAllText($taskMetadata, '{"kind":"windows-task","configured":false,"elevated":false}', [Text.UTF8Encoding]::new($false))
@@ -89,7 +103,7 @@ if ($taskConfig.autoStart -cne $true) {
 }
 $taskRuntime = Join-Path $taskPlugin 'runtime\node.exe'
 $taskEntry = Join-Path $taskPlugin 'desktop\background.mjs'
-if (-not (Test-Path -LiteralPath $taskRuntime -PathType Leaf) -or -not (Test-Path -LiteralPath $taskEntry -PathType Leaf)) {
+if (-not (Test-Path -LiteralPath $taskRuntime -PathType Leaf) -or -not (Test-Path -LiteralPath $taskEntry -PathType Leaf) -or -not (Test-Path -LiteralPath $taskShared -PathType Leaf)) {
     throw '后台运行时或入口缺失，请重新安装完整插件包'
 }
 $taskElevated = $Highest -or ($taskPrevious -and [string]$taskPrevious.Principal.RunLevel -eq 'Highest')
@@ -98,12 +112,18 @@ if ($Highest -and -not ([Security.Principal.WindowsPrincipal]::new($taskIdentity
 $taskAction = New-ScheduledTaskAction -Execute $taskRuntime -Argument ('"' + $taskEntry + '" --data "' + $taskFullRoot + '"') -WorkingDirectory $taskPlugin
 if ($Start) { $null = Stop-CodexLanBackground $taskPrevious }
 $taskPrincipal = New-ScheduledTaskPrincipal -UserId $taskUser -LogonType Interactive -RunLevel $taskLevel
-$taskTrigger = New-ScheduledTaskTrigger -AtLogOn -User $taskUser
-$taskTrigger.Delay = 'PT15S'
+# The Windows Startup folder owns logon activation. The task remains callable
+# for the gateway's existing permission and restart behavior.
 $taskSettings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
-Register-ScheduledTask -TaskName $taskName -Action $taskAction -Principal $taskPrincipal -Trigger $taskTrigger -Settings $taskSettings -Description $taskMarker -Force -ErrorAction Stop | Out-Null
+Register-ScheduledTask -TaskName $taskName -Action $taskAction -Principal $taskPrincipal -Settings $taskSettings -Description $taskMarker -Force -ErrorAction Stop | Out-Null
+$taskStartup = $taskShell.CreateShortcut($taskStartupPath)
+$taskStartup.TargetPath = $taskShared
+$taskStartup.Arguments = '--login --data "' + $taskFullRoot + '"'
+$taskStartup.WorkingDirectory = $taskPlugin
+$taskStartup.Description = '启动 Codex、手机连接网关和共享控制'
+$taskStartup.Save()
 if ($taskOld) { Unregister-ScheduledTask -TaskName $taskOldName -Confirm:$false -ErrorAction Stop }
 Remove-Item -LiteralPath (Join-Path $taskFullRoot 'background-launch.local.vbs') -ErrorAction SilentlyContinue
-$taskValue = @{kind='windows-task'; configured=$true; elevated=[bool]$taskElevated}
+$taskValue = @{kind='windows-task'; configured=$true; elevated=[bool]$taskElevated; taskName=$taskName}
 [IO.File]::WriteAllText($taskMetadata, ($taskValue | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
 if ($Start) { Start-ScheduledTask -TaskName $taskName -ErrorAction Stop }

@@ -95,6 +95,10 @@ the official EasyTier archive for the local user's installation (see prepare-des
 Unofficial project; third-party components retain their respective licenses.
 "@
 Set-Content -LiteralPath (Join-Path $taskLicenses 'SOURCES.txt') -Value $taskNotice -Encoding utf8
+$taskCompiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+$taskSharedLauncher = Join-Path $taskRuntime 'CodexLanSharedLaunch.exe'
+& $taskCompiler /nologo /target:winexe /platform:x64 /codepage:65001 "/out:$taskSharedLauncher" /r:System.Windows.Forms.dll (Join-Path $PSScriptRoot 'windows-shared-launcher.cs')
+if ($LASTEXITCODE -ne 0) { throw '共享控制启动程序编译失败' }
 $taskHashes = @{}
 foreach ($taskFile in @(Get-ChildItem -LiteralPath $taskRuntime,$taskVendor -File)) { $taskHashes[$taskFile.Name] = (Get-FileHash -LiteralPath $taskFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
 $taskHashes | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskPlugin 'dependency-hashes.json') -Encoding utf8

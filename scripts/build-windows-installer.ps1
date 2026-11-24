@@ -28,6 +28,15 @@ if (!$installer.Contains($anchor)) { throw 'Installer hook missing' }
 foreach($file in Get-ChildItem $stage -Recurse -Force -File) {
     if($file.FullName.Substring($stage.Length) -match '(?i)[\\/](secrets|\.local|shared_prefs|databases)[\\/]|\.local\.(json|md)$|\.(keystore|jks|pfx|p12|pem|key|crt)$') { throw 'Private file in payload' }
 }
+$taskCompiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+$taskSharedLauncher = Join-Path $plugin 'runtime/CodexLanSharedLaunch.exe'
+& $taskCompiler /nologo /target:winexe /platform:x64 /codepage:65001 "/out:$taskSharedLauncher" /r:System.Windows.Forms.dll (Join-Path $PSScriptRoot 'windows-shared-launcher.cs')
+if ($LASTEXITCODE -ne 0) { throw '共享控制启动程序编译失败' }
+$launcherHashes = Join-Path $plugin 'dependency-hashes.json'
+$launcherManifest = Get-Content -LiteralPath $launcherHashes -Raw | ConvertFrom-Json
+$launcherDigest = (Get-FileHash -LiteralPath $taskSharedLauncher -Algorithm SHA256).Hash.ToLowerInvariant()
+$launcherManifest | Add-Member -NotePropertyName 'CodexLanSharedLaunch.exe' -NotePropertyValue $launcherDigest -Force
+$launcherManifest | ConvertTo-Json | Set-Content -LiteralPath $launcherHashes -Encoding utf8
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = "$stage.zip"
 [IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip)
