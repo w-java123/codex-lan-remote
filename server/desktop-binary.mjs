@@ -1,6 +1,38 @@
 import { stat, readdir } from 'node:fs/promises';
 import path from 'node:path';
 
+const storePackage = /^OpenAI\.Codex_\d+\.\d+\.\d+\.\d+_x64__2p2nqsd0c76g0$/i;
+const storeServerPath = path.join('app', 'resources', 'codex.exe');
+const isFile = file => stat(file).then(value => value.isFile(), () => false);
+
+async function storePackages(root) {
+  return (await readdir(root, {withFileTypes:true}).catch(() => []))
+    .filter(row => row.isDirectory() && storePackage.test(row.name))
+    .sort((a,b) => b.name.localeCompare(a.name,'en',{numeric:true}));
+}
+
+export async function resolveSharedDesktop(configured, {programFiles = process.env.ProgramW6432 || process.env.ProgramFiles} = {}) {
+  const roots = new Set();
+  if (configured) {
+    const configuredPath = path.resolve(configured);
+    const packageDir = path.dirname(path.dirname(path.dirname(configuredPath)));
+    const root = path.dirname(packageDir);
+    if (path.basename(root).toLowerCase() === 'windowsapps' && storePackage.test(path.basename(packageDir)) &&
+        path.relative(packageDir, configuredPath).toLowerCase() === storeServerPath) roots.add(root);
+  }
+  if (programFiles) roots.add(path.join(programFiles, 'WindowsApps'));
+  for (const root of roots) {
+    for (const pkg of await storePackages(root)) {
+      const packageDir = path.join(root, pkg.name);
+      const desktop = path.join(packageDir, 'app', 'ChatGPT.exe');
+      const binary = path.join(packageDir, storeServerPath);
+      const [hasDesktop, hasBinary] = await Promise.all([isFile(desktop), isFile(binary)]);
+      if (hasDesktop && hasBinary) return {desktop, binary};
+    }
+  }
+  throw Error('找不到完整的 Microsoft Store 版 Codex 桌面安装。');
+}
+
 // Desktop-managed binaries move on app updates. Never fall back to the npm CLI.
 export async function resolveDesktopBinary(configured, {localAppData = process.env.LOCALAPPDATA} = {}) {
   if(configured && await stat(configured).then(value=>value.isFile(),()=>false))return configured;
@@ -8,15 +40,10 @@ export async function resolveDesktopBinary(configured, {localAppData = process.e
     const configuredPath=path.resolve(configured);
     const resources=path.dirname(configuredPath),app=path.dirname(resources);
     const packageDir=path.dirname(app),windowsApps=path.dirname(packageDir);
-    const packageName=/^OpenAI\.Codex_\d+\.\d+\.\d+\.\d+_x64__2p2nqsd0c76g0$/i;
-    const relativeBinary=path.join('app','resources','codex.exe');
-    if(path.basename(windowsApps).toLowerCase()==='windowsapps'&&packageName.test(path.basename(packageDir))&&
-       path.relative(packageDir,configuredPath).toLowerCase()===relativeBinary){
-      const packages=(await readdir(windowsApps,{withFileTypes:true}).catch(()=>[]))
-        .filter(row=>row.isDirectory()&&packageName.test(row.name))
-        .sort((a,b)=>b.name.localeCompare(a.name,'en',{numeric:true}));
-      for(const installed of packages){
-        const binary=path.join(windowsApps,installed.name,relativeBinary);
+    if(path.basename(windowsApps).toLowerCase()==='windowsapps'&&storePackage.test(path.basename(packageDir))&&
+       path.relative(packageDir,configuredPath).toLowerCase()===storeServerPath){
+      for(const installed of await storePackages(windowsApps)){
+        const binary=path.join(windowsApps,installed.name,storeServerPath);
         if(await stat(binary).then(value=>value.isFile(),()=>false))return binary;
       }
       throw Error('未找到已安装的桌面 Codex 程序，请打开桌面 Codex 后重试');

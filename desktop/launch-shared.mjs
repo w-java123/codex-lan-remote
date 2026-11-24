@@ -1,8 +1,8 @@
 import { access } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { adminCall, dataRoot, ensureManager } from './client.mjs';
 import { atomicJson, readJson } from './config.mjs';
-import { resolveDesktopBinary } from '../server/desktop-binary.mjs';
+import { resolveSharedDesktop } from '../server/desktop-binary.mjs';
 import { runSharedOwner } from './shared-owner.mjs';
 
 const args = process.argv.slice(2);
@@ -37,9 +37,7 @@ try {
     throw Error('手机连接网关已启动。请等普通 Codex 的任务结束并从桌面菜单退出，再双击「Codex 手机共享控制」。');
   }
 
-  const binary = await resolveDesktopBinary(config?.codexBinary);
-  const desktop = join(dirname(binary), '..', 'ChatGPT.exe');
-  await access(desktop).catch(() => { throw Error('找不到 Windows Codex 桌面，请先从 Microsoft Store 安装或更新 Codex。'); });
+  const {desktop, binary} = await resolveSharedDesktop(config?.codexBinary);
   await status('starting-shared-desktop');
   const active = await runSharedOwner({dataDirectory:root, desktop, binary, onReady:()=>status('ready')});
   await status(active === false ? 'already-starting' : 'closed');
