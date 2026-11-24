@@ -77,7 +77,6 @@ public final class MainActivity extends Activity {
     private TextView modelChoice,latestJump;
     private ConversationRail jumpRail;
     private PopupWindow railPreview,modelPopup;
-    private final java.util.Map<String,JSONObject> pendingModels=new java.util.HashMap<>();
     private final java.util.Map<String,JSONObject> modelCache=new java.util.LinkedHashMap<>();
     private final java.util.Map<String,Long> modelCacheAt=new java.util.HashMap<>();
     private static final class ModelLoad {final RemoteApi client;final int epoch;ModelLoad(RemoteApi client,int epoch){this.client=client;this.epoch=epoch;}}
@@ -514,7 +513,7 @@ public final class MainActivity extends Activity {
         boolean appToolsQueue=currentThread.has("modelSelectionSupported")
             &&("queue".equals(operation)||!files.isEmpty()||payload.optString("text").trim().startsWith("/"));
         JSONObject modelChoiceToSend=clearComposer&&!appToolsQueue&&("start".equals(operation)||"queue".equals(operation))
-            ?pendingModels.get(filesKey):null;
+            ?pendingModel(filesKey):null;
         final java.util.Set<String> before;try{before=new java.util.HashSet<>(SentMessages.users(currentThread).keySet());}catch(Exception e){return;}
         if(!commands.begin(chat,id))return;setButtons(false);RemoteApi channel=client.readChannel();commandChannels.put(id,channel);
         worker.execute(() -> {
@@ -529,7 +528,10 @@ public final class MainActivity extends Activity {
                     JSONObject modelCommand=new JSONObject(modelChoiceToSend.toString()).put("op","model").put("threadId",chat);
                     channel.call("POST","/v1/command",modelCommand,UUID.randomUUID().toString());
                     runOnUiThread(()->{
-                        if(epoch!=generation||client!=api||!pendingModels.remove(filesKey,modelChoiceToSend))return;
+                        if(epoch!=generation||client!=api)return;
+                        android.content.SharedPreferences choices=pendingModelPreferences();
+                        if(!modelChoiceToSend.toString().equals(choices.getString(filesKey,"")))return;
+                        choices.edit().remove(filesKey).apply();
                         try{
                             JSONObject cached=modelCache.get(filesKey);
                             if(cached!=null)cached.put("current",modelChoiceToSend);
@@ -785,9 +787,17 @@ public final class MainActivity extends Activity {
     private void modelDialog(){if(!isSending())loadModels(true);}
     private String effortLabel(String value){return ModelPresentation.effort(value);}
     private PowerLabel powerText(String value,int size,int color){PowerLabel label=new PowerLabel(this);label.setText(value);label.setTextSize(size);label.setTextColor(color);label.setPadding(0,dp(7),0,dp(7));return label;}
+    private android.content.SharedPreferences pendingModelPreferences(){
+        return getSharedPreferences("pendingModels",MODE_PRIVATE);
+    }
+    private JSONObject pendingModel(String key){
+        String value=pendingModelPreferences().getString(key,null);
+        if(value==null)return null;
+        try{return new JSONObject(value);}catch(org.json.JSONException ignored){return null;}
+    }
     private void updateModelChoice(){
         if(modelChoice==null||currentThread==null||api==null)return;
-        JSONObject choice=pendingModels.get(modelCacheKey(api,currentThread.optString("id")));
+        JSONObject choice=pendingModel(modelCacheKey(api,currentThread.optString("id")));
         String model=choice==null?currentThread.optString("model"):choice.optString("model");
         String effort=choice==null?currentThread.optString("reasoningEffort"):choice.optString("effort");
         String tier=choice==null?currentThread.optString("serviceTier"):choice.optString("serviceTier");
@@ -800,9 +810,12 @@ public final class MainActivity extends Activity {
         String key=modelCacheKey(client,threadId);
         if(model.equals(currentThread.optString("model"))&&effort.equals(currentThread.optString("reasoningEffort"))
             &&tier.equals(currentThread.optString("serviceTier","default"))){
-            pendingModels.remove(key);
+            pendingModelPreferences().edit().remove(key).apply();
         }else{
-            try{pendingModels.put(key,new JSONObject().put("model",model).put("effort",effort).put("serviceTier",tier));}
+            try{
+                JSONObject choice=new JSONObject().put("model",model).put("effort",effort).put("serviceTier",tier);
+                pendingModelPreferences().edit().putString(key,choice.toString()).apply();
+            }
             catch(org.json.JSONException e){return false;}
         }
         updateModelChoice();
@@ -810,7 +823,7 @@ public final class MainActivity extends Activity {
     }
     private void dismissModelPopup(){if(modelPopup!=null){modelPopup.dismiss();modelPopup=null;}}
     private void showModelMenu(JSONArray models,JSONObject supplied,String threadId,RemoteApi client,int epoch){
-        JSONObject pending=pendingModels.get(modelCacheKey(client,threadId));
+        JSONObject pending=pendingModel(modelCacheKey(client,threadId));
         JSONObject current=pending!=null?pending:supplied==null?new JSONObject():supplied;
         JSONObject selected=models.optJSONObject(0);for(int i=0;i<models.length();i++){JSONObject candidate=models.optJSONObject(i);if(candidate.optString("model").equals(current.optString("model")))selected=candidate;}
         final JSONObject model=selected;
@@ -849,7 +862,11 @@ public final class MainActivity extends Activity {
         });sliderView[0]=slider;panel.addView(slider,new LinearLayout.LayoutParams(-1,dp(46)));style.run();
         lightning.setOnClickListener(v->{if(fastTier!=null)submit.accept(confirmed[0],fast[0]?"default":"priority");});
         reset.setOnClickListener(v->{String defaultEffort=model.optString("defaultEffort");for(int i=0;i<efforts.length();i++)if(efforts.optString(i).equals(defaultEffort)){slider.setProgress(i);if(i!=confirmed[0])submit.accept(i,null);return;}});
-        modelName.setOnClickListener(v->{dismissModelPopup();showModelPicker(models,pendingModels.getOrDefault(modelCacheKey(client,threadId),supplied),threadId,client,epoch);});
+        modelName.setOnClickListener(v->{
+            dismissModelPopup();
+            JSONObject draft=pendingModel(modelCacheKey(client,threadId));
+            showModelPicker(models,draft==null?supplied:draft,threadId,client,epoch);
+        });
         modelPopup=AnchoredMenu.show(this,modelChoice,panel,dp(320),false);
     }
     private void showModelPicker(JSONArray models,JSONObject current,String threadId,RemoteApi client,int epoch){
@@ -1211,7 +1228,7 @@ public final class MainActivity extends Activity {
         items.addView(text("关于",13,muted));items.addView(text("Codex LAN · "+appVersion()+"\n非官方远控客户端",14,muted));
           settingRow(items,"检测更新","主／次版本提醒、GitHub 下载与电脑插件更新",appUpdates::open);
         settingRow(items,"清除本机配对","删除本机连接信息，重新配对电脑",()->new AlertDialog.Builder(this).setTitle("清除本机配对？").setMessage("手机上的连接信息将删除。电脑端的授权记录仍需在电脑撤销；EasyTier 配置保留。")
-            .setNegativeButton("返回",null).setPositiveButton("清除",(d,w)->{generation++;api.cancel();stopService(new android.content.Intent(this,SessionService.class));SessionService.latest=null;api=null;currentState=null;selectedThreadId="";drafts.clear();pendingModels.clear();storage.clear();dialog.dismiss();connectionPage();}).show());
+            .setNegativeButton("返回",null).setPositiveButton("清除",(d,w)->{generation++;api.cancel();stopService(new android.content.Intent(this,SessionService.class));SessionService.latest=null;api=null;currentState=null;selectedThreadId="";drafts.clear();pendingModelPreferences().edit().clear().apply();storage.clear();dialog.dismiss();connectionPage();}).show());
         android.os.Handler refresh=new android.os.Handler(getMainLooper());Runnable networkRefresh=new Runnable(){public void run(){networkHint.setText(EasyTierVpnService.state);if(dialog.isShowing())refresh.postDelayed(this,1000);}};dialog.setOnDismissListener(d->refresh.removeCallbacks(networkRefresh));
         dialog.show();dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent);dialog.getWindow().setLayout(-1,-1);refresh.post(networkRefresh);
     }
@@ -1306,7 +1323,7 @@ public final class MainActivity extends Activity {
         if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(updates, filter, RECEIVER_NOT_EXPORTED); else registerReceiver(updates, filter);
         refreshPairingUi();
         if(api==null&&connectionGuideVisible&&!PairingCoordinator.busy()&&!PairingCoordinator.failed())try{JSONObject pending=PairingCoordinator.pending(this);if(pending!=null&&"waiting".equals(pending.optString("phase"))&&EasyTierVpnService.permissionIntent(this)==null)PairingCoordinator.start(this);}catch(Exception ignored){}
-        if (api != null) {restoreSavedNetwork();beginPolling();}
+        if (api != null) {restoreSavedNetwork();beginPolling(true);}
         renderHandler.post(themeClock);
     }
     @Override protected void onPause(){

@@ -25,6 +25,8 @@ export function groupThreads(threads, state = {}) {
     ?? (ownerStates.length === 1 ? ownerStates[0][1] : undefined);
   const atoms = { ...state['electron-persisted-atom-state'], ...owner };
   const prefs = atoms['flat-project-sidebar-preferences-v1'] || {};
+  const savedChats = atoms['codex-sidebar-chat-order-v1']?.threadIds || [];
+  const looseOrder = new Map(savedChats.map((id,index)=>[id,index]));
   const identity = atoms['local-document-identity'];
   const identityKey = identity?.accountId && identity?.userId
     ? createHash('sha256').update(JSON.stringify(['chatgpt', identity.accountId, identity.userId])).digest('hex')
@@ -41,12 +43,11 @@ export function groupThreads(threads, state = {}) {
       .map(key => key.slice(14)).filter(id => projectPins.includes(id))
     : [];
   const pinnedProjects = [...new Set([...orderedPins, ...projectPins])];
-  const pinnedProjectThreads = Array.isArray(unifiedPins)
-    ? unifiedPins.filter(key => typeof key === 'string' && key.startsWith('codex:thread:local:'))
-      .map(key => key.slice('codex:thread:local:'.length))
-    : [];
   const unified=atoms['unified-sidebar-project-order-v1'];
   const projectOrder=Array.isArray(unified)?unified.filter(id=>typeof id==='string'&&id.startsWith('codex:project:')).map(id=>id.slice(14)):order;
+  const recentOrder = new Map(threads.map(({id,updatedAt})=>({id,updatedAt:Number(updatedAt)||0}))
+    .sort((a,b)=>b.updatedAt-a.updatedAt).map(({id},index)=>[id,index]));
+  const pinnedByActivity = ['updated_at','priority'].includes(atoms['pinned-sidebar-sort-mode-v1']);
   const normalized = value => String(value || '').replaceAll('\\', '/').replace(/\/$/, '').toLowerCase();
   const result = threads.map((thread, index) => {
     const assigned = assignments[thread.id];
@@ -70,18 +71,29 @@ export function groupThreads(threads, state = {}) {
     const groupId = section?.id || (project ? 'project:' + project.id : 'chats');
     const savedOrder = manual[project?.id];
     const positions = Array.isArray(savedOrder) ? savedOrder : savedOrder?.threadIds || [];
-    const desktopPosition = projectPinIndex >= 0 ? pinnedProjectThreads.indexOf(thread.id) : -1;
-    const manualIndex = prefs.chatSortMode === 'manual' ? positions.indexOf(thread.id) : -1;
-    const projectPosition = desktopPosition >= 0 ? desktopPosition : manualIndex;
+    const manualIndex = prefs.projectSortMode === 'manual' ? positions.indexOf(thread.id) : -1;
+    const fallbackOrder = recentOrder.get(thread.id);
+    const conversationOrder = groupId.startsWith('project:') && prefs.projectSortMode === 'manual'
+      ? manualIndex >= 0 ? manualIndex : positions.length + fallbackOrder
+      : groupId === 'chats' && prefs.chatSortMode === 'manual'
+        ? looseOrder.get(thread.id) ?? looseOrder.size + fallbackOrder : fallbackOrder;
     return { id:thread.id, name:thread.name || thread.preview?.slice(0,70) || '未命名聊天', updatedAt:thread.updatedAt, unread:unreadIds ? unreadIds.has(thread.id) : thread.readState?.firstUnread != null,
       groupId:isPinned?'pinned':groupId, groupName:isPinned?'置顶':section?.name || project?.name || '其他会话',pinned:isPinned,projectPinned:!isPinned&&!section&&projectPinIndex>=0,
       groupOrder:isPinned?-20000:section ? -1 : projectPinIndex>=0?-10000+projectPinIndex:project ? (projectOrder.indexOf(project.id) < 0 ? projectOrder.length : projectOrder.indexOf(project.id)) : projectOrder.length + 1,
-      order:isPinned?(pinIndex<0?index:pinIndex):projectPosition >= 0 ? projectPosition : pinnedProjectThreads.length + positions.length + index };
+      order:isPinned?(pinnedByActivity?fallbackOrder:pinIndex<0?pinned.length+index:pinIndex):conversationOrder };
   });
   if(prefs.projectSortMode==='updated_at'){
-    const newest=new Map();for(const row of result)if(row.groupId.startsWith('project:')&&!row.projectPinned)newest.set(row.groupId,Math.max(newest.get(row.groupId)||0,Number(row.updatedAt)||0));
-    const ids=[...newest.keys()].sort((a,b)=>newest.get(b)-newest.get(a));for(const row of result)if(row.groupId.startsWith('project:')&&!row.projectPinned&&row.groupOrder===projectOrder.length)row.groupOrder+=ids.indexOf(row.groupId);
+    const recentProjects = new Map();
+    for (const row of result) if (row.groupId.startsWith('project:') && !row.projectPinned) {
+      const at=Number(row.updatedAt)||0;
+      const previous=recentProjects.get(row.groupId);
+      if (!previous || at>previous.at) recentProjects.set(row.groupId,{at,rank:row.groupOrder});
+    }
+    const projectRanks=new Map([...recentProjects].sort(([,a],[,b])=>b.at-a.at||a.rank-b.rank)
+      .map(([id],index)=>[id,index]));
+    for (const row of result) if (projectRanks.has(row.groupId)) row.groupOrder=projectRanks.get(row.groupId);
   }
-  if(prefs.mode==='list'||prefs.mode==='connection')for(const row of result)if(row.groupId==='chats'||row.groupId.startsWith('project:')){row.groupId='chats';row.groupName=prefs.mode==='connection'?'这台电脑':'全部会话';row.groupOrder=order.length+1;}
+  if(prefs.mode==='list'||prefs.mode==='connection')for(const row of result)if(row.groupId==='chats'||row.groupId.startsWith('project:')){row.groupId='chats';row.groupName=prefs.mode==='connection'?'这台电脑':'全部会话';row.groupOrder=order.length+1;row.order=prefs.chatSortMode==='manual'
+    ? looseOrder.get(row.id) ?? looseOrder.size + recentOrder.get(row.id) : recentOrder.get(row.id);}
   return result.sort((a,b) => a.groupOrder-b.groupOrder || a.groupId.localeCompare(b.groupId) || a.order-b.order);
 }
