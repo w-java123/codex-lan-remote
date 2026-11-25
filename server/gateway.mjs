@@ -64,7 +64,8 @@ export function createGateway({ tls, bridge, uploads, desktopVersion = '', devic
     publishTimer.unref();
   };
   bridge.on('changed', changed);
-  const server = https.createServer({ ...tls, minVersion: 'TLSv1.2', maxHeaderSize: 8192 }, async (request, response) => {
+  const serverOptions={...tls,minVersion:'TLSv1.2',maxHeaderSize:8192,requestTimeout:120000,headersTimeout:10000};
+  const server = https.createServer(serverOptions, async (request, response) => {
     try {
       // Native client only. Prevent browser-origin requests and CSRF pairing.
       if (request.headers.origin || request.headers['sec-fetch-site']) throw fail(403, '仅允许已配对客户端');
@@ -105,7 +106,17 @@ export function createGateway({ tls, bridge, uploads, desktopVersion = '', devic
         if(bridge.snapshot().some(row=>row.id===threadId&&row.attachmentsSupported===false))throw fail(409,'当前桌面会话的附件发送尚不可用');
         if(request.headers['content-type']!=='application/octet-stream')throw fail(415,'需要二进制文件');
         if(Number(request.headers['content-length'])>32*1024*1024)throw fail(413,'文件超过 32 MB');
-        reply(response,200,await uploads.receive(request,{name:url.searchParams.get('name'),threadId,sessionHash,authorized:allowed}));return;
+        const started=Date.now();
+        try {
+          const uploaded=await uploads.receive(request,{name:url.searchParams.get('name'),threadId,sessionHash,authorized:allowed});
+          server.emit('controlAction',{at:new Date().toISOString(),threadId,op:'upload',ok:true,ms:Date.now()-started,bytes:uploaded.size});
+          reply(response,200,uploaded);
+        } catch(error) {
+          server.emit('controlAction',{at:new Date().toISOString(),threadId,op:'upload',ok:false,ms:Date.now()-started,
+            status:error.status??(request.destroyed?499:500)});
+          throw error;
+        }
+        return;
       }
       if (request.method === 'GET' && url.pathname === '/v1/file') {
         const thread=bridge.snapshot().find(thread=>thread.id===url.searchParams.get('threadId'));
@@ -205,6 +216,15 @@ export function createGateway({ tls, bridge, uploads, desktopVersion = '', devic
         } else reply(response, 200, { version, desktopVersion, deviceId, connectionAddresses, threads: prioritizeThreads(bridge.snapshot(),selections.get(sessionHash)) });
         return;
       }
+      if (request.method === 'GET' && url.pathname === '/v1/command-receipt') {
+        const id=request.headers['idempotency-key'];
+        if(typeof id!=='string'||!/^[a-zA-Z0-9-]{16,80}$/.test(id))throw fail(400,'缺少有效操作编号');
+        const operation=idempotency.get(sessionHash+':'+id);
+        if(!operation)throw fail(404,'尚未收到此提交');
+        try { reply(response,200,await operation.promise); }
+        catch(error){throw fail(error.status||409,error.message);}
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/v1/command') {
         const input = await body(request);
         if (typeof input.threadId !== 'string' || !['start', 'steer', 'queue', 'queue-remove', 'interrupt', 'approve', 'model', 'answer','compact'].includes(input.op)) throw fail(400, '不支持的操作');
@@ -218,6 +238,7 @@ export function createGateway({ tls, bridge, uploads, desktopVersion = '', devic
         if (operation && operation.payloadHash !== payloadHash) throw fail(409, '操作编号已被其他请求使用');
         if (!operation) {
           if (idempotency.size >= 2000) throw fail(429, '操作缓存已满，请重启服务');
+          const started=Date.now();
           const prior = locks.get(input.threadId) || Promise.resolve();
           operation = { payloadHash, promise: prior.catch(() => {}).then(async () => {
             if (!sessions.has(sessionHash)) throw fail(401, '设备授权已撤销');
@@ -230,8 +251,8 @@ export function createGateway({ tls, bridge, uploads, desktopVersion = '', devic
               const command={...input,attachments};
               Object.defineProperty(command,'authorized',{value:()=>sessions.has(sessionHash)});
               const result = await bridge.command(input.threadId, command);
-              server.emit('controlAction', { ...action, ok: true }); return result;
-            } catch (error) { server.emit('controlAction', { ...action, ok: false }); throw error; }
+              server.emit('controlAction', { ...action, ok: true, ms:Date.now()-started }); return result;
+            } catch (error) { server.emit('controlAction', { ...action, ok: false, ms:Date.now()-started }); throw error; }
           }) };
           idempotency.set(key, operation);
           locks.set(input.threadId, operation.promise);
@@ -244,10 +265,10 @@ export function createGateway({ tls, bridge, uploads, desktopVersion = '', devic
       throw fail(404, '接口不存在');
     } catch (error) { reply(response, error.status || 500, { error: error.status ? error.message : '服务请求失败' }); }
   });
-  server.requestTimeout = 30000; server.headersTimeout = 10000; server.maxConnections = 40;
+  server.maxConnections = 40;
   server.on('close', () => { clearTimeout(publishTimer); bridge.off('changed', changed); bridge.off('sidebarChanged', sidebarChanged); sidebarChanged(); for (const wake of [...waiters]) wake(); });
   return {
-    createListener() { return https.createServer({ ...tls, minVersion: 'TLSv1.2', maxHeaderSize: 8192 }, server.listeners('request')[0]); },
+    createListener() { const listener=https.createServer(serverOptions,server.listeners('request')[0]); listener.maxConnections=server.maxConnections; return listener; },
     server,
     get pairingCode() { return pairingCode; },
     get pairingUntil() { return pairingUntil; },

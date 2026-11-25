@@ -2,7 +2,7 @@ import { watchDesktopSidebar } from './sidebar.mjs';
 import { EventEmitter } from 'node:events';
 import { DesktopIpcClient } from './desktop-ipc.mjs';
 import { ThreadState, getTurns, summarizeThread, activeTurn } from './thread-state.mjs';
-import { pendingQuestions, pendingAttention, validateAnswers } from './user-questions.mjs';
+import { pendingQuestions, pendingAttention, toolApprovalDetails, validateAnswers } from './user-questions.mjs';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { messageInput } from './message-input.mjs';
@@ -32,6 +32,8 @@ export class DesktopBridge extends EventEmitter {
       this.sidebarRevision++;
       this.catalogAt = 0;
       this.emit('sidebarChanged');
+      const entry=this.entries.get(this.desktopSelection?.id);
+      if(entry?.ready)void this.refreshQueue(entry,this.generation);
     });
     this.clientFactory = clientFactory;
     this.generation = 0;
@@ -62,6 +64,11 @@ export class DesktopBridge extends EventEmitter {
     for (const entry of this.entries.values()) { entry.ready = false; }
     const client = this.clientFactory({ controlThreadIds: [...this.entries.values()].filter(entry => entry.writable).map(entry => entry.id), timeoutMs: 30000 });
     this.client = client;
+    client.on('queueChanged', conversationId=>{
+      if(generation!==this.generation)return;
+      const entry=this.entries.get(conversationId);
+      if(entry)void this.refreshQueue(entry,generation);
+    });
     client.on('queuedMessages',({conversationId,messages})=>{
       if(generation!==this.generation)return;const entry=this.entries.get(conversationId);if(!entry)return;
       const server=(entry.nativeQueue||[]).filter(row=>row.serverQueue),clients=new Set(server.map(row=>row.clientUserMessageId));
@@ -234,7 +241,7 @@ export class DesktopBridge extends EventEmitter {
         if(entry.resubscribe){client.unfollowThread?.(entry.id);entry.resubscribe=false;}
         if (selection && this.desktopSelection === selection) selection.followAt = Date.now();
         await client.followThread(entry.id, owner);
-        if (entry.nativeQueue === undefined) void this.refreshQueue(entry, generation);
+        if (client.sharedOwner || entry.nativeQueue === undefined) void this.refreshQueue(entry, generation);
         const [history]=await Promise.allSettled([
           (async () => {
             if (selection) {
@@ -380,7 +387,7 @@ export class DesktopBridge extends EventEmitter {
     requireAuthorization();
     if(command.op==='queue-remove'){
       if(!(entry.nativeQueue||[]).some(row=>row.id===command.messageId&&row.serverQueue))throw Error('只能移出当前的原生排队消息，请刷新');
-      if(!await this.historyReader.deleteNativeMessage(id,command.messageId))throw Error('消息已离开队列，请刷新');
+      if(!await this.historyReader.deleteNativeMessage(id,command.messageId,this.liveQueueRequest(entry)))throw Error('消息已离开队列，请刷新');
       entry.queueEpoch=(entry.queueEpoch||0)+1;
       entry.nativeQueue=(entry.nativeQueue||[]).filter(row=>row.id!==command.messageId);
       this.emit('changed');
@@ -402,7 +409,7 @@ export class DesktopBridge extends EventEmitter {
     const {input}=messageInput(text,{attachments,skills,cwd,id:messageId});
     requireAuthorization();
     let queued;
-    try{queued=await this.historyReader.enqueueNativeMessage(id,messageId,input);}
+    try{queued=await this.historyReader.enqueueNativeMessage(id,messageId,input,this.liveQueueRequest(entry));}
     catch{throw Error('桌面未确认排队，请先核对队列，避免重复提交');}
     entry.queueEpoch=(entry.queueEpoch||0)+1;
     entry.nativeQueue=[...(entry.nativeQueue||[]).filter(row=>row.id!==queued.id),queued];
@@ -410,14 +417,23 @@ export class DesktopBridge extends EventEmitter {
     return {accepted:true,queued:true,nativeQueue:true,messageId:queued.id};
   }
 
+  liveQueueRequest(entry) {
+    const client=this.client;
+    return client?.initialized&&client.sharedOwner&&client.subscriptions.has(entry.id) ? client.request.bind(client) : undefined;
+  }
+
   async refreshQueue(entry,generation){
-    if(!this.historyReader?.queuedMessages||entry.queueLoading)return;
+    if(!this.historyReader?.queuedMessages||this.closed||generation!==this.generation)return;
+    if(entry.queueLoading){entry.queueReload=true;return;}
     entry.queueLoading=true;const epoch=entry.queueEpoch||0;
     try{
-      const queue=await this.historyReader.queuedMessages(entry.id);
+      const queue=await this.historyReader.queuedMessages(entry.id,this.liveQueueRequest(entry));
       if(!this.closed&&generation===this.generation&&this.entries.get(entry.id)===entry&&(entry.queueEpoch||0)===epoch){entry.nativeQueue=queue;this.emit('changed');}
     }catch{/* A temporary read failure must not erase the last observed queue. */}
-    finally{entry.queueLoading=false;}
+    finally{
+      entry.queueLoading=false;
+      if(entry.queueReload){entry.queueReload=false;void this.refreshQueue(entry,this.generation);}
+    }
   }
   maybeAutoTitle(entry,generation,persistedTurns){
     if((persistedTurns?!this.canUseAppTools(entry):!entry.ready)||!this.autoTitles?.wants(entry.id))return;
@@ -451,6 +467,7 @@ export class DesktopBridge extends EventEmitter {
       const appToolsReady=appToolsAvailable&&entry.appToolsStatus==='idle'&&!entry.appToolsPending;
       const appToolsModel=appToolsAvailable?(this.phoneModels.get(entry.id) ?? entry.appToolsModelSettings):undefined;
       const nativeQueueSupported=this.canUseNativeQueue(entry);
+      const canApproveTool=!!(this.client?.sharedOwner&&entry.writable&&typeof this.client.replyToolApproval==='function');
       const summary = summarizeThread(state);
       const turns = new Map((entry.history || []).map(turn => [turn.id, turn]));
       for (const turn of summary.turns) {
@@ -480,8 +497,13 @@ export class DesktopBridge extends EventEmitter {
         revision: entry.store.revision, runtimeStatus: appToolsAvailable?entry.appToolsStatus:(summary.runtimeStatus || 'unavailable'),
         turns: [...turns.values()].slice(-50),
         questions: entry.ready ? pendingQuestions(state).map(q => ({ ...q, submitting: entry.consumed.has(JSON.stringify(['question', q.turnId, q.id])) })) : [],
-        attentionRequests: entry.ready ? pendingAttention(state) : [],
+        attentionRequests: entry.ready ? pendingAttention(state,canApproveTool) : [],
         approvals: (liveTurn ? state?.requests || [] : []).flatMap(request => {
+          if(request.completed===true)return [];
+          const requestId=request.id??request.requestId;
+          const tool=canApproveTool&&toolApprovalDetails(request,liveTurn.turnId,entry.id);
+          if(tool&&requestId!==undefined)return [{id:requestId,kind:'tool',turnId:liveTurn.turnId,...tool,
+            decisions:['accept','decline'],submitting:entry.consumed.has(JSON.stringify([liveTurn.turnId,requestId]))}];
           const type = String(request.type || request.method || '');
           const kind = /command/i.test(type) ? 'command' : /file/i.test(type) ? 'file' : null;
           if (!kind) return [];
@@ -591,9 +613,18 @@ export class DesktopBridge extends EventEmitter {
     } else if (command.op === 'approve') {
       if (command.turnId && command.turnId !== active?.turnId) throw new Error('审批轮次已变化，请刷新后操作');
       const request = state.requests?.find(value => (value.id ?? value.requestId) === command.requestId);
-      if (!request) throw new Error('审批已失效');
+      if (!request || request.completed===true) throw new Error('审批已失效');
       const key = JSON.stringify([getTurns(state).at(-1)?.turnId, command.requestId]);
       if (entry.consumed.has(key)) throw new Error('审批已提交，请等待桌面确认');
+      const tool=active&&this.client.sharedOwner&&typeof this.client.replyToolApproval==='function'&&
+        toolApprovalDetails(request,active.turnId,threadId);
+      if(tool){
+        if(command.turnId!==active.turnId||!['accept','decline'].includes(command.decision))throw Error('工具审批已变化或不支持该选项');
+        entry.consumed.add(key);
+        if(entry.consumed.size>1000)entry.consumed.delete(entry.consumed.values().next().value);
+        await this.client.replyToolApproval(threadId,command.requestId,command.decision);
+        return {accepted:true};
+      }
       if (this.client.sharedOwner && (!active || request.params?.turnId !== active.turnId)) throw Error('审批轮次已变化，请刷新后操作');
       const available = request.params?.availableDecisions || (this.client.sharedOwner ? ['accept', 'decline', 'cancel'] : ['accept', 'cancel']);
       if (!['accept', 'decline', 'cancel'].includes(command.decision) || !available.includes(command.decision)) throw new Error('不支持该审批选项');

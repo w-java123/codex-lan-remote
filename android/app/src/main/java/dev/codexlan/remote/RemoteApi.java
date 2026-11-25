@@ -57,6 +57,17 @@ final class RemoteApi {
     JSONObject call(String method, String path, JSONObject body, String operationId) throws Exception {
         return call(method,path,body,operationId,8000,30000);
     }
+    JSONObject submit(JSONObject payload,String operationId)throws Exception {
+        try { return call("POST","/v1/command",payload,operationId); }
+        catch(java.io.IOException original) {
+            // Reconnect only to read the original result. Never resend a mutation on a lost response.
+            if(Thread.currentThread().isInterrupted())throw original;
+            try { return call("GET","/v1/command-receipt",null,operationId,3000,8000); }
+            catch(ApiException receipt){if(receipt.status!=404)throw receipt;}
+            catch(java.io.IOException ignored){}
+            throw original;
+        }
+    }
     private HttpsURLConnection connection(String path)throws Exception{
         URL url=new URL(address+path);java.net.Proxy proxy=EasyTierProxy.forHost(url.getHost());
         return (HttpsURLConnection)(proxy==java.net.Proxy.NO_PROXY?url.openConnection():url.openConnection(proxy));
@@ -71,7 +82,10 @@ final class RemoteApi {
             connection.setConnectTimeout(connectTimeout); connection.setReadTimeout(readTimeout); connection.setInstanceFollowRedirects(false);
             connection.setRequestMethod(method); connection.setRequestProperty("Accept", "application/json");
             if (token != null && !token.isEmpty()) connection.setRequestProperty("Authorization", "Bearer " + token);
-            if (operationId != null) connection.setRequestProperty("Idempotency-Key", operationId);
+            if (operationId != null) {
+                connection.setRequestProperty("Idempotency-Key", operationId);
+                connection.setRequestProperty("Connection","close");
+            }
             if (body != null) {
                 byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
                 connection.setDoOutput(true); connection.setRequestProperty("Content-Type", "application/json"); connection.setFixedLengthStreamingMode(bytes.length);
@@ -108,6 +122,7 @@ final class RemoteApi {
         try{
             connection.setSSLSocketFactory(socketFactory);connection.setHostnameVerifier(verifier);connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(8000);connection.setReadTimeout(60000);
             connection.setRequestMethod("POST");connection.setRequestProperty("Authorization","Bearer "+token);connection.setRequestProperty("Content-Type","application/octet-stream");connection.setDoOutput(true);
+            connection.setRequestProperty("Connection","close");
             if(size>=0)connection.setFixedLengthStreamingMode(size);else connection.setChunkedStreamingMode(16384);
             long total=0;try(java.io.OutputStream output=connection.getOutputStream()){byte[] buffer=new byte[16384];int count;while((count=source.read(buffer))!=-1){total+=count;if(total>PhoneAttachments.MAX_BYTES)throw new Exception("文件超过 32 MB");output.write(buffer,0,count);}}
             int status=connection.getResponseCode();InputStream response=status>=400?connection.getErrorStream():connection.getInputStream();

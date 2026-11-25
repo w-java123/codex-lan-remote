@@ -16,6 +16,7 @@ import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
     private final ExecutorService worker = Executors.newFixedThreadPool(3);
+    private final ExecutorService commandWorker = Executors.newFixedThreadPool(2);
     private final ChatFiles chatFiles=new ChatFiles(this);
     private AppUpdates appUpdates;
     private int background,foreground,muted,accent;
@@ -131,7 +132,8 @@ public final class MainActivity extends Activity {
         if(attachmentTray==null)return;attachmentTray.removeAllViews();
         for(PhoneAttachments.Item item:phoneAttachments.snapshot(attachmentKey())){
             LinearLayout row=new LinearLayout(this);row.setGravity(android.view.Gravity.CENTER_VERTICAL);
-            TextView label=text(item.name,13,foreground);label.setSingleLine(true);label.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);row.addView(label,new LinearLayout.LayoutParams(0,dp(48),1));
+            TextView label=text(item.name,13,foreground);label.setSingleLine(true);label.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+            label.setContentDescription("预览附件 "+item.name);label.setOnClickListener(v->chatFiles.previewDraft(item));row.addView(label,new LinearLayout.LayoutParams(0,dp(48),1));
             Button remove=icon("close","移除附件 "+item.name,false);remove.setEnabled(!isSending());remove.setOnClickListener(v->{phoneAttachments.remove(attachmentKey(),item);renderAttachments();setButtons(currentThread!=null&&currentThread.optBoolean("ready"));});row.addView(remove,new LinearLayout.LayoutParams(dp(48),dp(48)));attachmentTray.addView(row);
         }
         attachmentTray.setVisibility(attachmentTray.getChildCount()==0?View.GONE:View.VISIBLE);
@@ -516,11 +518,19 @@ public final class MainActivity extends Activity {
             ?pendingModel(filesKey):null;
         final java.util.Set<String> before;try{before=new java.util.HashSet<>(SentMessages.users(currentThread).keySet());}catch(Exception e){return;}
         if(!commands.begin(chat,id))return;setButtons(false);RemoteApi channel=client.readChannel();commandChannels.put(id,channel);
-        worker.execute(() -> {
+        commandWorker.execute(() -> {
+            boolean submitting=false;
             try {
                 if(!files.isEmpty()){
                     JSONArray ids=new JSONArray();
-                    for(PhoneAttachments.Item file:files){try(java.io.InputStream input=getContentResolver().openInputStream(file.uri)){if(input==null)throw new Exception("文件已无法读取，请重新选择");ids.put(channel.upload(chat,file.name,file.size,input).getString("id"));}}
+                    for(PhoneAttachments.Item file:files){
+                        try(java.io.InputStream input=getContentResolver().openInputStream(file.uri)){
+                            if(input==null)throw new java.io.IOException("文件已无法读取，请重新选择");
+                            ids.put(channel.upload(chat,file.name,file.size,input).getString("id"));
+                        } catch(Exception e) {
+                            throw new java.io.IOException("附件「"+file.name+"」上传失败："+error(e),e);
+                        }
+                    }
                     payload.put("attachmentIds",ids);
                     if(epoch!=generation||client!=api||Thread.currentThread().isInterrupted())throw new Exception("连接已切换，附件保留在草稿中，请确认后再发送");
                 }
@@ -545,7 +555,8 @@ public final class MainActivity extends Activity {
                     });
                     if(epoch!=generation||client!=api||Thread.currentThread().isInterrupted())return;
                 }
-                JSONObject result=channel.call("POST", "/v1/command", payload, id);
+                submitting=true;
+                JSONObject result=channel.submit(payload,id);
                 runOnUiThread(() -> { if (epoch == generation && client == api) {
                     phoneAttachments.accepted(filesKey,files);renderAttachments();
                     if(clearComposer&&!result.optBoolean("queued")&&("start".equals(payload.optString("op"))||"steer".equals(payload.optString("op")))){sentMessages.accepted(chat,id,payload.optString("text"),before);if(chat.equals(selectedThreadId)){renderRevision++;scheduleRows();}}
@@ -553,7 +564,11 @@ public final class MainActivity extends Activity {
                     if(result.optBoolean("nativeQueue"))toast("已加入桌面队列，将使用桌面会话的模型设置");
                     if(confirmed!=null)confirmed.run();
                 } });
-            } catch (Exception e) { runOnUiThread(() -> { if (epoch == generation && client == api){toast("提交未确认，请检查聊天状态后再操作：" + error(e));} }); }
+            } catch (Exception e) {
+                String message=submitting&&!(e instanceof RemoteApi.ApiException)
+                    ?"提交未确认，请检查聊天状态后再操作："+error(e):error(e);
+                runOnUiThread(() -> { if (epoch == generation && client == api)toast(message); });
+            }
             finally { channel.cancel();runOnUiThread(() -> {commandChannels.remove(id);commands.finish(chat,id);if(epoch==generation&&client==api)setButtons(currentThread!=null&&currentThread.optBoolean("ready"));}); }
         });
     }
@@ -943,7 +958,7 @@ public final class MainActivity extends Activity {
             }
             else if("approval".equals(row.type)){
                 JSONObject approval=row.data;String threadId=currentThread.optString("id");
-                Button reviewButton=button(approval.optBoolean("submitting")?"审批已提交 · 等待确认":"查看并处理"+("file".equals(approval.optString("kind"))?"文件审批":"命令审批"));reviewButton.setEnabled(!approval.optBoolean("submitting"));reviewButton.setOnClickListener(v->review(approval,threadId));wrapper.addView(reviewButton);
+                Button reviewButton=button(approval.optBoolean("submitting")?"审批已提交 · 等待确认":"查看并处理"+("tool".equals(approval.optString("kind"))?"工具审批":"file".equals(approval.optString("kind"))?"文件审批":"命令审批"));reviewButton.setEnabled(!approval.optBoolean("submitting"));reviewButton.setOnClickListener(v->review(approval,threadId));wrapper.addView(reviewButton);
             }else {TextView welcome=text("一起把想法变成现实\n发送任务，继续电脑上的工作。",20,foreground);welcome.setPadding(dp(8),dp(90),dp(8),dp(32));wrapper.addView(welcome);}
             return wrapper;
         }
@@ -961,6 +976,7 @@ public final class MainActivity extends Activity {
         try {
             String details = "命令：\n" + approval.optString("command", "") + "\n\n目录：" + approval.optString("cwd", "") + "\n\n原因：" + approval.optString("reason", "");
             if ("file".equals(approval.optString("kind"))) details = "文件变更：\n" + approval.getJSONArray("changes").toString(2);
+            if ("tool".equals(approval.optString("kind"))) details = approval.optString("serverName")+" · "+approval.optString("tool")+"\n\n"+approval.optString("reason")+"\n"+approval.optString("argumentsText");
             TextView content = text(details, 14, foreground); content.setTypeface(Typeface.MONOSPACE); content.setPadding(dp(20), dp(10), dp(20), dp(10));
             ScrollView detailsScroll = new ScrollView(this); detailsScroll.addView(content);
             AlertDialog.Builder dialog = new AlertDialog.Builder(this).setTitle("桌面请求审批").setView(detailsScroll).setNeutralButton("稍后处理", null);
@@ -1335,5 +1351,5 @@ public final class MainActivity extends Activity {
     @Override protected void onStop() { cancelVoice();renderHandler.removeCallbacks(themeClock);if(!restoreVpnPermission)networkRestoreAttempted=false;visible = false; generation++;modelOpenWanted="";modelLoading.clear(); unregisterReceiver(updates); if (api != null) { api.cancel(); } commands.clear();for(RemoteApi channel:commandChannels.values())channel.cancel();commandChannels.clear(); dismissRailPreview();dismissModelPopup();if(usagePopup!=null)usagePopup.dismiss();if(jumpRail!=null)jumpRail.cancel();super.onStop(); }
     @Override public void onWindowFocusChanged(boolean focused){super.onWindowFocusChanged(focused);if(focused&&appUpdates!=null)appUpdates.focus();}
     @Override public void startActivityForResult(android.content.Intent intent,int request,Bundle options){if(appUpdates!=null)appUpdates.external();try{super.startActivityForResult(intent,request,options);}catch(RuntimeException e){if(appUpdates!=null)appUpdates.navigationFailed();throw e;}}
-    @Override protected void onDestroy() { cancelVoice();if(speechInput!=null)speechInput.destroy();if(voiceModels!=null)voiceModels.close();generation++;renderRevision++;renderHandler.removeCallbacks(prepareRows);renderHandler.removeCallbacks(flushRows);renderWorker.shutdownNow();chatFiles.close();if(appUpdates!=null)appUpdates.close(); if (api != null) api.cancel(); worker.shutdownNow(); super.onDestroy(); }
+    @Override protected void onDestroy() { cancelVoice();if(speechInput!=null)speechInput.destroy();if(voiceModels!=null)voiceModels.close();generation++;renderRevision++;renderHandler.removeCallbacks(prepareRows);renderHandler.removeCallbacks(flushRows);renderWorker.shutdownNow();chatFiles.close();if(appUpdates!=null)appUpdates.close(); if (api != null) api.cancel(); worker.shutdownNow(); commandWorker.shutdownNow(); super.onDestroy(); }
 }

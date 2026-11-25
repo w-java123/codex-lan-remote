@@ -108,7 +108,10 @@ export class SharedDesktopClient extends EventEmitter {
     } else if (method === 'turn/completed') {
       if (entry.active?.id === params.turn?.id) entry.active = null;
       entry.liveItems.delete(params.turn?.id);
-      for (const [id, request] of entry.requests) if (request.params.turnId === params.turn?.id) entry.requests.delete(id);
+      for (const [id, request] of entry.requests) if (request.params.turnId == null || request.params.turnId === params.turn?.id) entry.requests.delete(id);
+    } else if (method === 'thread/queue/changed') {
+      this.emit('queueChanged', params.threadId);
+      return;
     } else if (method === 'thread/settings/updated') {
       const settings = params.threadSettings;
       if (settings) entry.settings = { ...entry.settings, ...settings, reasoningEffort: settings.effort ?? settings.reasoningEffort ?? entry.settings?.reasoningEffort };
@@ -230,11 +233,13 @@ export class SharedDesktopClient extends EventEmitter {
     }
   }
 
-  steerTurn(threadId, text, { expectedTurnId, attachments, skills, cwd } = {}) {
+  async steerTurn(threadId, text, { expectedTurnId, attachments, skills, cwd } = {}) {
     this.requireControl(threadId);
     if (!expectedTurnId) throw Error('该轮次已变化，请刷新');
     const { id, input } = messageInput(text, { attachments, skills, cwd });
-    return this.request('turn/steer', { threadId, expectedTurnId, clientUserMessageId: id, input });
+    const result=await this.request('turn/steer', { threadId, expectedTurnId, clientUserMessageId: id, input });
+    if(result?.turnId!==expectedTurnId)throw Error('桌面未确认插话已送达当前轮次，请刷新核对');
+    return result;
   }
 
   interruptTurn(threadId, turnId) {
@@ -264,6 +269,7 @@ export class SharedDesktopClient extends EventEmitter {
 
   replyCommandApproval(threadId, id, decision) { return this.reply(threadId, id, 'item/commandExecution/requestApproval', { decision }); }
   replyFileApproval(threadId, id, decision) { return this.reply(threadId, id, 'item/fileChange/requestApproval', { decision }); }
+  replyToolApproval(threadId, id, action) { return this.reply(threadId, id, 'mcpServer/elicitation/request', { action, content: null }); }
   replyUserInput(threadId, id, answers) { return this.reply(threadId, id, 'item/tool/requestUserInput', { answers }); }
 
   disconnected(socket) {

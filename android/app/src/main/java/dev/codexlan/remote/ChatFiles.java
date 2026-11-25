@@ -47,17 +47,61 @@ final class ChatFiles {
             LinearLayout.LayoutParams space=new LinearLayout.LayoutParams(-1,-2);space.topMargin=dp(8);space.bottomMargin=dp(4);parent.addView(card,space);
         }
     }
+    void previewDraft(PhoneAttachments.Item item) {
+        worker.execute(()->{
+            File temporary=null;
+            try {
+                File root=previewCache();
+                String name=item.name.replaceAll("[^\\p{L}\\p{N}._ -]","_");
+                File local=new File(root,hash(item.uri.toString())+"-"+name);
+                String mime=activity.getContentResolver().getType(item.uri);
+                String kind=mime!=null&&mime.startsWith("image/")?"image":
+                    mime!=null&&mime.startsWith("text/")?"text":"document";
+                temporary=File.createTempFile("draft-",".tmp",root);
+                try(InputStream in=activity.getContentResolver().openInputStream(item.uri);
+                    OutputStream out=new FileOutputStream(temporary)) {
+                    if(in==null)throw new IOException("附件已无法读取，请重新选择");
+                    byte[] buffer=new byte[16384];long size=0;int count;
+                    while((count=in.read(buffer))!=-1){
+                        size+=count;
+                        if(size>PhoneAttachments.MAX_BYTES)throw new IOException("文件超过 32 MB");
+                        out.write(buffer,0,count);
+                    }
+                }
+                if(!temporary.renameTo(local))throw new IOException("保存预览失败");
+                trimCache(root,local);
+                JSONObject ref=new JSONObject().put("name",item.name).put("kind",kind);
+                ui(()->preview(local,ref));
+            } catch(Exception e) { error(e); }
+            finally { if(temporary!=null)temporary.delete(); }
+        });
+    }
+    private File previewCache() throws IOException {
+        File root=new File(activity.getCacheDir(),"previews");
+        if(!root.isDirectory()&&!root.mkdirs()&&!root.isDirectory())throw new IOException("无法建立文件缓存");
+        return root;
+    }
+    private void trimCache(File root,File keep) {
+        File[] old=root.listFiles(file->file.isFile()&&!file.getName().endsWith(".tmp"));
+        if(old==null)return;
+        java.util.Arrays.sort(old,java.util.Comparator.comparingLong(File::lastModified).reversed());
+        long total=0;
+        for(int i=0;i<old.length;i++){
+            total+=old[i].length();
+            if(!old[i].equals(keep)&&(i>=48||total>96L*1024*1024))old[i].delete();
+        }
+    }
     private CompletableFuture<File> load(RemoteApi api,String chat,JSONObject ref){
         String name=ref.optString("name","file").replaceAll("[^\\p{L}\\p{N}._ -]","_");if(name.length()>120)name=name.substring(name.length()-120);
         String key=api.fingerprint+":"+chat+":"+ref.optString("id");final String filename=hash(key)+"-"+name;
         return loading.computeIfAbsent(key,k->{CompletableFuture<File> future=CompletableFuture.supplyAsync(()->{
             RemoteApi channel=api.readChannel();channels.add(channel);
             try{
-                File root=new File(activity.getCacheDir(),"previews");if(!root.isDirectory()&&!root.mkdirs())throw new IOException("无法建立文件缓存");
+                File root=previewCache();
                 File local=new File(root,filename);if(local.isFile()&&System.currentTimeMillis()-local.lastModified()<60000)return local;
                 byte[] bytes=channel.file(chat,ref.optString("id"));File temporary=File.createTempFile("preview-",".tmp",root);
                 try{try(FileOutputStream out=new FileOutputStream(temporary)){out.write(bytes);}if(!temporary.renameTo(local))throw new IOException("保存预览失败");}finally{temporary.delete();}
-                File[] old=root.listFiles();if(old!=null){java.util.Arrays.sort(old,java.util.Comparator.comparingLong(File::lastModified).reversed());long total=0;for(int i=0;i<old.length;i++){total+=old[i].length();if(!old[i].equals(local)&&(i>=48||total>96L*1024*1024))old[i].delete();}}
+                trimCache(root,local);
                 return local;
             }catch(Exception e){throw new CompletionException(e);}finally{channels.remove(channel);channel.cancel();}
         },worker);future.whenComplete((value,error)->ui(()->loading.remove(k,future)));return future;});

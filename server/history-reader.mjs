@@ -92,18 +92,19 @@ export class HistoryReader {
   async localQueuedMessages(threadId){
     const sidebar=await this.sidebarReader();const rows=sidebar['queued-follow-ups']?.[threadId];return Array.isArray(rows)?rows:[];
   }
-  async queuedMessages(threadId){
+  async queuedMessages(threadId, liveRequest){
     const local=await this.localQueuedMessages(threadId);let server=[];
-    if(this.serverQueueSupported!==false){
+    if(liveRequest||this.serverQueueSupported!==false){
       try{
-        await this.connect();let cursor;const seen=new Set();
+        if(!liveRequest)await this.connect();let cursor;const seen=new Set();
         do{
-          const page=await this.request('thread/queue/list',{threadId,limit:100,...cursor?{cursor}:{}});
+          const page=await (liveRequest??this.request.bind(this))('thread/queue/list',{threadId,limit:100,...cursor?{cursor}:{}});
           server.push(...(page.data||[]).filter(row=>typeof row.id==='string').map(nativeQueueRow));
           cursor=page.nextCursor;if(cursor&&seen.has(cursor))throw Error('排队消息分页游标重复');if(cursor)seen.add(cursor);
         }while(cursor&&server.length<100);
         this.serverQueues??=new Map();this.serverQueues.set(threadId,server);
       }catch(error){
+        if(liveRequest)throw error;
         if(error.code===-32601)this.serverQueueSupported=false;
         else server=this.serverQueues?.get(threadId)||[];
       }
@@ -112,17 +113,17 @@ export class HistoryReader {
     return [...server,...local.filter(row=>!clients.has(row.id))];
   }
   hasNativeQueue(threadId){
-    return this.serverQueueSupported!==false&&this.serverQueues?.has(threadId)===true;
+    return this.serverQueues?.has(threadId)===true;
   }
-  async enqueueNativeMessage(threadId,clientUserMessageId,input){
-    await this.connect();
-    const result=await this.request('thread/queue/add',{threadId,clientUserMessageId,input});
+  async enqueueNativeMessage(threadId,clientUserMessageId,input,liveRequest){
+    if(!liveRequest)await this.connect();
+    const result=await (liveRequest??this.request.bind(this))('thread/queue/add',{threadId,clientUserMessageId,input});
     if(!result?.queuedSubmission?.id||result.queuedSubmission.clientUserMessageId!==clientUserMessageId)throw Error('桌面未确认排队，请先核对队列');
     return nativeQueueRow(result.queuedSubmission);
   }
-  async deleteNativeMessage(threadId,queuedSubmissionId){
-    await this.connect();
-    const result=await this.request('thread/queue/delete',{threadId,queuedSubmissionId});
+  async deleteNativeMessage(threadId,queuedSubmissionId,liveRequest){
+    if(!liveRequest)await this.connect();
+    const result=await (liveRequest??this.request.bind(this))('thread/queue/delete',{threadId,queuedSubmissionId});
     return result?.deleted===true;
   }
   async threadModelSettings(threadId) {

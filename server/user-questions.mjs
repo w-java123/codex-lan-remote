@@ -1,9 +1,29 @@
 import { getTurns, activeTurn } from './thread-state.mjs';
 import { userText } from './turn-timeline.mjs';
 
+export function toolApprovalDetails(request, turnId, threadId) {
+  const p = request.params, meta = p?._meta, schema = p?.requestedSchema;
+  if ((request.method || request.type) !== 'mcpServer/elicitation/request' ||
+      request.completed === true || p?.threadId !== threadId ||
+      (p.turnId != null && p.turnId !== turnId) ||
+      !['form','openai/form','openaiForm'].includes(p.mode) ||
+      meta?.codex_approval_kind !== 'mcp_tool_call' ||
+      typeof p.serverName !== 'string' || !p.serverName.trim() || p.serverName.length > 200 ||
+      typeof p.message !== 'string' || !p.message.trim() || p.message.length > 8000 ||
+      !(schema === null || (schema?.type === 'object' && schema.properties &&
+        !Array.isArray(schema.properties) && typeof schema.properties === 'object' &&
+        !Object.keys(schema.properties).length && !schema.required?.length))) return null;
+  const tool = [meta.tool_title,meta.tool_name].find(value=>typeof value==='string'&&value.trim()&&value.length<=300);
+  const fields = Array.isArray(meta.tool_params_display) ? meta.tool_params_display.map(row =>
+    [row?.display_name || row?.name, row?.value]).filter(([name])=>typeof name==='string') : [];
+  const argumentsText=fields.map(([name,value])=>name+' = '+JSON.stringify(value)).join('\n');
+  if(argumentsText.length>12000)return null;
+  return { serverName:p.serverName, tool:tool||'', reason:p.message, argumentsText };
+}
+
 // Some desktop permission/tool requests have no supported mobile response API.
 // Notify without forwarding raw permission payloads or inventing approval choices.
-export function pendingAttention(state) {
+export function pendingAttention(state, canApproveTool = false) {
   const active=activeTurn(state);if(!active)return [];
   const titles={
     'item/permissions/requestApproval':'Codex 需要电脑权限授权',
@@ -12,6 +32,7 @@ export function pendingAttention(state) {
   };
   return (state?.requests||[]).flatMap(request=>{
     const kind=request.method||request.type,title=titles[kind],params=request.params||{},id=request.id??request.requestId;
+    if(canApproveTool&&toolApprovalDetails(request,active.turnId,state.id))return [];
     if(!title||request.completed===true||id===undefined||params.turnId&&params.turnId!==active.turnId)return [];
     if(params.itemId&&!(active.items||[]).some(item=>item.id===params.itemId))return [];
     return [{id,kind,turnId:active.turnId,title,message:'请在电脑 Codex 中查看并处理此请求。'}];

@@ -88,15 +88,17 @@ final class ChatNotifications {
                 if (!posted.add(tag)) continue;
                 String details = request.optString("command", "");
                 if (request.optString("kind").equals("file")) details = "文件变更：" + request.optJSONArray("changes");
-                boolean canQuickApprove = MobileState.canQuickApprove(request, details);
+                boolean toolApproval = "tool".equals(request.optString("kind"));
+                if(toolApproval)details=request.optString("reason");
+                boolean canQuickApprove = !toolApproval&&MobileState.canQuickApprove(request, details);
                 Notification.Builder builder = new Notification.Builder(context, "chat_approval").setSmallIcon(android.R.drawable.ic_dialog_alert)
-                    .setContentTitle("Codex 需要审批 · " + (request.optString("kind").equals("file") ? "文件修改" : "命令执行"))
+                    .setContentTitle("Codex 需要审批 · " + (toolApproval?"工具确认":request.optString("kind").equals("file") ? "文件修改" : "命令执行"))
                     .setContentText(details.length() > 140 ? details.substring(0, 140) + "…" : details)
                     .setStyle(new Notification.BigTextStyle().bigText(details.length() > 1800 ? details.substring(0, 1800) + "…请进入聊天查看完整内容" : details))
                     .setContentIntent(open(thread)).setVisibility(Notification.VISIBILITY_PRIVATE).setOnlyAlertOnce(true);
                 if (Build.VERSION.SDK_INT >= 29) builder.setAllowSystemGeneratedContextualActions(false);
                 JSONArray decisions = request.getJSONArray("decisions");
-                for (int j = 0; j < decisions.length(); j++) {
+                for (int j = 0; !toolApproval&&j < decisions.length(); j++) {
                     String decision = decisions.getString(j);
                     if (decision.equals("accept") && !canQuickApprove) continue;
                     String label = decision.equals("accept") ? "允许一次" : decision.equals("cancel") ? "取消任务" : "拒绝";
