@@ -13,12 +13,16 @@ async function storePackages(root) {
 
 export async function resolveSharedDesktop(configured, {programFiles = process.env.ProgramW6432 || process.env.ProgramFiles} = {}) {
   const roots = new Set();
+  let registered;
   if (configured) {
     const configuredPath = path.resolve(configured);
     const packageDir = path.dirname(path.dirname(path.dirname(configuredPath)));
     const root = path.dirname(packageDir);
     if (path.basename(root).toLowerCase() === 'windowsapps' && storePackage.test(path.basename(packageDir)) &&
-        path.relative(packageDir, configuredPath).toLowerCase() === storeServerPath) roots.add(root);
+        path.relative(packageDir, configuredPath).toLowerCase() === storeServerPath) {
+      roots.add(root);
+      registered = {desktop: path.join(packageDir, 'app', 'ChatGPT.exe'), binary: configuredPath};
+    }
   }
   if (programFiles) roots.add(path.join(programFiles, 'WindowsApps'));
   for (const root of roots) {
@@ -30,6 +34,7 @@ export async function resolveSharedDesktop(configured, {programFiles = process.e
       if (hasDesktop && hasBinary) return {desktop, binary};
     }
   }
+  if (registered && await isFile(registered.desktop) && await isFile(registered.binary)) return registered;
   throw Error('找不到完整的 Microsoft Store 版 Codex 桌面安装。');
 }
 

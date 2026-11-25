@@ -4,8 +4,24 @@ $taskBundle = $PSScriptRoot
 if (-not (Test-Path -LiteralPath (Join-Path $taskBundle '.agents\plugins\marketplace.json'))) { throw '请从完整桌面插件发布包中运行此安装脚本' }
 if (-not $CodexPath) {
     $taskCodexFiles = @(Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin') -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-Item -LiteralPath (Join-Path $_.FullName 'codex.exe') -ErrorAction SilentlyContinue } | Sort-Object LastWriteTime -Descending)
-    if (-not $taskCodexFiles.Count) { throw '未检测到桌面 Codex，请用 -CodexPath 指定桌面内置 codex.exe' }
-    $CodexPath = $taskCodexFiles[0].FullName
+    if ($taskCodexFiles.Count) {
+        $CodexPath = $taskCodexFiles[0].FullName
+    } elseif (Get-Command Get-AppxPackage -ErrorAction SilentlyContinue) {
+        # WindowsApps may allow access to a known registered package but deny listing the parent.
+        $taskStorePackages = Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq 'OpenAI.Codex' -and $_.PublisherId -eq '2p2nqsd0c76g0' -and
+                $_.Architecture -eq 'X64' -and $_.InstallLocation } |
+            Sort-Object Version -Descending
+        foreach ($taskPackage in $taskStorePackages) {
+            $taskServer = Join-Path $taskPackage.InstallLocation 'app\resources\codex.exe'
+            $taskDesktop = Join-Path $taskPackage.InstallLocation 'app\ChatGPT.exe'
+            if ((Test-Path -LiteralPath $taskServer -PathType Leaf) -and (Test-Path -LiteralPath $taskDesktop -PathType Leaf)) {
+                $CodexPath = $taskServer
+                break
+            }
+        }
+    }
+    if (-not $CodexPath) { throw '未找到完整的桌面 Codex。请安装 Microsoft Store 版 Codex，或用 -CodexPath 指定桌面内置 codex.exe。' }
 }
 if (-not $DataDirectory) { $DataDirectory = Join-Path $env:LOCALAPPDATA 'CodexLAN' }
 New-Item -ItemType Directory -Force -Path $DataDirectory | Out-Null
