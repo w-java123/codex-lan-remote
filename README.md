@@ -1,12 +1,12 @@
 # Codex LAN Remote
 
-[![正式版 0.5.0](https://img.shields.io/badge/正式版-0.5.0-green)](https://github.com/fabulouszcc/codex-lan-remote/releases/tag/v0.5.0)
+[![发行版](https://img.shields.io/badge/GitHub-发行版-green)](https://github.com/w-java123/codex-lan-remote/releases/latest)
 
 在 Android 手机上继续操作电脑里的 Codex：发送任务、查看进度、处理审批，离开电脑也能跟进工作。
 
 项目由 **Android 客户端**和 **Windows「手机连接」插件**组成，支持局域网直连和 EasyTier 异地组网。
 
-[下载安装包](https://github.com/fabulouszcc/codex-lan-remote/releases) · [电脑端使用指南](docs/电脑端插件使用指南.md)
+[下载安装包](https://github.com/w-java123/codex-lan-remote/releases/latest) · [电脑端使用指南](docs/电脑端插件使用指南.md) · [原项目](https://github.com/fabulouszcc/codex-lan-remote)
 
 ## 解决什么问题
 
@@ -49,32 +49,9 @@
 
 ### 1. 安装电脑插件
 
-**交给 Codex 安装**：在 Windows 电脑上的 Codex 中新建聊天，复制发送下面这段话：
+从 [GitHub 最新发行版](https://github.com/w-java123/codex-lan-remote/releases/latest) 下载并运行 `Codex-LAN-Windows-x64-Setup.exe`。安装后打开「手机连接设置」，按页面引导配对。
 
-```text
-请帮我在这台 Windows 电脑上安装 Codex LAN Remote「手机连接」插件：
-https://github.com/fabulouszcc/codex-lan-remote
-
-请从最新 Release 下载 Windows 插件 ZIP，完整解压到固定目录，运行 install-desktop-plugin.ps1 完成安装；如果已经安装，请升级并保留现有配置、证书和手机授权。
-安装完成后，在 Codex 右侧面板打开「手机连接设置」，并提供同一 Release 的 Android APK 下载链接，方便我在手机上安装和扫码配对。
-```
-
-如出现 Windows 授权提示，按提示确认即可。手机 APK 仍需在手机上安装。
-
-**手动安装**：
-
-从 [Releases](https://github.com/fabulouszcc/codex-lan-remote/releases) 下载 Windows 插件 ZIP，完整解压，在解压目录执行：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install-desktop-plugin.ps1
-```
-
-首次安装需要联网补齐依赖。升级时运行新版安装器即可，已有连接配置、证书和手机授权会保留。请保留解压目录。
-
-安装完成后，通过以下任一入口打开设置：
-
-- 在 Codex 中启用「手机连接」插件，选择「打开手机连接设置」，在右侧面板管理连接。
-- 打开桌面或开始菜单中的「手机连接设置」。
+同一发行版提供 Android APK 和校验清单。已经安装旧版的用户先覆盖安装支持增量更新的版本。后续在电脑的「手机连接设置」或手机的「检测更新」里检查新版。[发行版与增量更新](docs/发行版与增量更新.md)
 
 ### 2. 选择连接方式
 

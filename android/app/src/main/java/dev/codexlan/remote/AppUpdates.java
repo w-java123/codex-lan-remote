@@ -20,7 +20,7 @@ final class AppUpdates {
     private final SharedPreferences preferences;
     private JSONObject available;
     private String desktop="",computer="";
-    private boolean checking,manualWanted,closed,started,skipResume;
+    private boolean applyingUpdate,checking,manualWanted,closed,started,skipResume;
     private TextView status,versions;
     private Dialog prompt,settings,permissionPrompt;
     private TextView installPermissionState;
@@ -28,7 +28,7 @@ final class AppUpdates {
     private TextView checkButton;
     private ProgressBar progress;
     private final Runnable startup=()->{if(!offerInstallPermission())check(false);};
-    AppUpdates(Activity activity,java.util.function.Supplier<RemoteApi> connection){this.activity=activity;this.connection=connection;preferences=activity.getSharedPreferences("updates",Context.MODE_PRIVATE);try{available=new JSONObject(preferences.getString("release","{}"));}catch(Exception ignored){}}
+    AppUpdates(Activity activity,java.util.function.Supplier<RemoteApi> connection){this.activity=activity;this.connection=connection;preferences=activity.getSharedPreferences("updates",Context.MODE_PRIVATE);try{available=new JSONObject(preferences.getString("forkRelease","{}"));}catch(Exception ignored){}}
     private String installed(){try{return activity.getPackageManager().getPackageInfo(activity.getPackageName(),0).versionName;}catch(Exception e){return "";}}
     private void ui(Runnable action){activity.runOnUiThread(()->{if(!closed&&!activity.isDestroyed())action.run();});}
     private void toast(String value){Toast.makeText(activity,value,Toast.LENGTH_LONG).show();}
@@ -72,26 +72,27 @@ final class AppUpdates {
         worker.execute(()->{
             JSONObject result=null;String remoteDesktop="",failure=null;
             if(api!=null){RemoteApi channel=api.readChannel();try{remoteDesktop=channel.call("GET","/v1/info",null,null,3000,5000).optString("desktopVersion");}catch(Exception ignored){}finally{channel.cancel();}}
-            try{long age=System.currentTimeMillis()-preferences.getLong("checkedAt",0);if(!manual&&available!=null&&available.has("tag")&&(current.contains("-")||!available.optString("tag").contains("-"))&&age>=0&&age<6*60*60*1000)result=available;else{result=GitHubUpdates.fetch(current);if(result==null||!result.has("tag")||!result.has("android")&&!result.has("desktop"))throw new Exception("发布页尚无可下载安装包");preferences.edit().putString("release",result.toString()).putLong("checkedAt",System.currentTimeMillis()).apply();}}catch(Exception error){failure=error.getMessage();}
+            try{long age=System.currentTimeMillis()-preferences.getLong("checkedAt",0);if(!manual&&available!=null&&available.has("tag")&&(current.contains("-")||!available.optString("tag").contains("-"))&&age>=0&&age<6*60*60*1000)result=available;else{result=GitHubUpdates.fetch(current);if(result==null||!result.has("tag")||!result.has("android")&&!result.has("desktop"))throw new Exception("发布页尚无可下载安装包");preferences.edit().putString("forkRelease",result.toString()).putLong("checkedAt",System.currentTimeMillis()).apply();}}catch(Exception error){failure=error.getMessage();}
             JSONObject release=result;String version=remoteDesktop,error=failure;
-            ui(()->{checking=false;checkingUi(false);boolean wanted=manualWanted;manualWanted=false;if(api==connection.get()&&UpdatePolicy.numbers(version)!=null){computer=computerKey();desktop=version;refreshVersions();}if(release!=null)available=release;if(error!=null){if(status!=null)status.setText("检查失败："+error+"\n可稍后重试或查看发布页。");else if(wanted)toast("更新检查失败，请稍后重试");return;}if(status!=null)status.setText("GitHub 最新版本  "+available.optString("tag")+"\n"+downloadStatus());boolean shown=maybePrompt(wanted);if(wanted&&!shown&&status!=null)status.append("\n未发现可用更新。");});
+            ui(()->{checking=false;checkingUi(false);boolean wanted=manualWanted;manualWanted=false;if(api==connection.get()&&UpdatePolicy.numbers(version)!=null){computer=computerKey();desktop=version;refreshVersions();}if(release!=null)available=release;if(error!=null){if(status!=null)status.setText("检查失败："+error+"\n可稍后重试或查看发布页。");else if(wanted)toast("更新检查失败，请稍后重试");return;}if(status!=null)status.setText("GitHub 最新版本  "+available.optString("tag")+"\n"+downloadStatus());boolean shown=maybePrompt(wanted);if(wanted&&!shown&&status!=null)status.append(available.has("androidVersion")||available.has("desktopVersion")?"\n未发现可用更新。":"\n未能确认双端版本，请查看发布页。");});
         });
     }
     void focus(){if(permissionPending&&offerInstallPermission())return;maybePrompt(false);}
     private boolean maybePrompt(boolean manual){
         if(closed||permissionPageOpen||permissionPrompt!=null&&permissionPrompt.isShowing()||!manual&&!preferences.getBoolean("installPermissionAsked",false)&&!installAllowed()||available==null||!available.has("tag")||activity.isFinishing()||!manual&&!activity.hasWindowFocus()||prompt!=null&&prompt.isShowing())return false;
         String tag=available.optString("tag");
-        boolean phone=available.has("android")&&UpdatePolicy.notify(tag,installed(),preferences.getString("ignoredAndroid",""),manual);
-        boolean pc=computer.equals(computerKey())&&available.has("desktop")&&UpdatePolicy.notify(tag,desktop,preferences.getString("ignoredDesktop",""),manual);
+        String phoneVersion=available.optString("androidVersion"),pcVersion=available.optString("desktopVersion");
+        boolean phone=available.has("android")&&UpdatePolicy.compare(phoneVersion,installed())>0&&(manual||!tag.equals(preferences.getString("ignoredAndroid","")));
+        boolean pc=computer.equals(computerKey())&&available.has("desktop")&&UpdatePolicy.compare(pcVersion,desktop)>0&&(manual||!tag.equals(preferences.getString("ignoredDesktop","")));
         String minimum=available.optString("minDesktopVersion");if(computer.equals(computerKey())&&available.has("desktop")&&UpdatePolicy.numbers(desktop)!=null&&UpdatePolicy.numbers(minimum)!=null&&UpdatePolicy.compare(minimum,desktop)>0&&(manual||!tag.equals(preferences.getString("ignoredDesktop",""))))pc=true;
         if(!manual){phone&=!prompted.contains(tag+":android");pc&=!prompted.contains(tag+":desktop:"+computerKey());}if(!phone&&!pc)return false;
         final boolean app=phone,plugin=pc;if(app)prompted.add(tag+":android");if(plugin)prompted.add(tag+":desktop:"+computerKey());
         UiPalette palette=UiPalette.of(activity);Dialog dialog=new Dialog(activity);prompt=dialog;dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);LinearLayout body=column();body.setPadding(dp(22),dp(20),dp(22),dp(16));body.setBackground(rounded(palette.dark?android.graphics.Color.rgb(35,35,35):android.graphics.Color.rgb(250,251,250),24));
         LinearLayout heading=new LinearLayout(activity);heading.setGravity(Gravity.CENTER_VERTICAL);ImageView icon=new ImageView(activity);icon.setImageDrawable(new UiIcon("download",palette.accent));heading.addView(icon,new LinearLayout.LayoutParams(dp(26),dp(26)));TextView title=text("发现新版本",20);title.setTypeface(null,android.graphics.Typeface.BOLD);title.setPadding(dp(12),0,0,0);heading.addView(title);body.addView(heading);TextView badge=text(tag,14);badge.setTextColor(palette.accent);section(body,badge,8);
-        LinearLayout versionCard=card();if(app)versionRow(versionCard,"手机 App",installed()+" → "+tag,"phone");if(plugin)versionRow(versionCard,"电脑插件",desktop+" → "+tag,"desktop");section(body,versionCard,8);
+        LinearLayout versionCard=card();if(app)versionRow(versionCard,"手机 App",installed()+" → "+phoneVersion,"phone");if(plugin)versionRow(versionCard,"电脑插件",desktop+" → "+pcVersion,"desktop");section(body,versionCard,8);
         if(plugin){TextView instruction=text("电脑插件需在电脑上安装更新，原连接配置可保留。",13);instruction.setTextColor(palette.muted);section(body,instruction,8);}
         TextView reminder=text("下次更新将在下次打开时提醒；忽略仅对当前版本生效。",12);reminder.setTextColor(palette.muted);section(body,reminder,8);
-        section(body,button(app?"现在更新":"查看电脑端更新",true,()->{dialog.dismiss();if(app)download(available.optJSONObject("android"),tag);else browse(available.optString("page",UpdatePolicy.PAGE));}),14);
+        section(body,button(app?"现在更新":"查看电脑端更新",true,()->{dialog.dismiss();if(app)updateAndroid(available);else browse(available.optString("page",UpdatePolicy.PAGE));}),14);
         LinearLayout choices=new LinearLayout(activity);TextView later=button("下次更新",false,dialog::dismiss);choices.addView(later,new LinearLayout.LayoutParams(0,-2,1));TextView ignore=button("忽略更新",false,()->{SharedPreferences.Editor edit=preferences.edit();if(app)edit.putString("ignoredAndroid",tag);if(plugin)edit.putString("ignoredDesktop",tag);edit.apply();dialog.dismiss();});LinearLayout.LayoutParams right=new LinearLayout.LayoutParams(0,-2,1);right.leftMargin=dp(8);choices.addView(ignore,right);section(body,choices,8);
         ScrollView content=new ScrollView(activity);content.setFillViewport(false);content.setBackground(body.getBackground());content.setClipToOutline(true);body.setBackground(null);content.addView(body);dialog.setContentView(content);dialog.show();Window window=dialog.getWindow();if(window!=null){window.setBackgroundDrawableResource(android.R.color.transparent);window.setDimAmount(.45f);int width=Math.min(dp(380),activity.getResources().getDisplayMetrics().widthPixels-dp(32));int max=activity.getResources().getDisplayMetrics().heightPixels-dp(96);body.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(max,View.MeasureSpec.UNSPECIFIED));window.setLayout(width,Math.min(body.getMeasuredHeight(),max));}return true;
     }
@@ -119,6 +120,33 @@ final class AppUpdates {
     private DownloadManager manager(){return (DownloadManager)activity.getSystemService(Context.DOWNLOAD_SERVICE);}
     private int state(){long id=preferences.getLong("downloadId",-1);if(id<0)return -1;try(Cursor cursor=manager().query(new DownloadManager.Query().setFilterById(id))){return cursor!=null&&cursor.moveToFirst()?cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)):-1;}catch(Exception e){return -1;}}
     private String downloadStatus(){int state=state();if(state==DownloadManager.STATUS_SUCCESSFUL)return "更新包已下载，可在下载列表中安装。";if(state==DownloadManager.STATUS_PENDING||state==DownloadManager.STATUS_RUNNING||state==DownloadManager.STATUS_PAUSED)return "更新包正在由系统下载，可在下载列表查看进度。";if(state==DownloadManager.STATUS_FAILED)return "上次下载失败，可重新检查并下载。";return "仅检测 GitHub 已发布的 Release，不检测代码提交。";}
+    private void updateAndroid(JSONObject release){
+        if(applyingUpdate)return;
+        if(!installAllowed()){requestInstallPermission();return;}
+        String tag=release.optString("tag");
+        applyingUpdate=true;
+        if(status!=null)status.setText("正在检查并下载适用的增量…");
+        worker.execute(()->{
+            try{
+                java.io.File apk=ApkUpdateDownload.prepare(activity,release);
+                ui(()->{
+                    applyingUpdate=false;
+                    Uri uri=new Uri.Builder().scheme("content").authority(activity.getPackageName()+".previews")
+                        .appendPath(ApkUpdateDownload.PATH).appendPath(apk.getName()).build();
+                    try{
+                        activity.startActivity(new Intent(Intent.ACTION_VIEW).setDataAndType(uri,"application/vnd.android.package-archive")
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION));
+                    }catch(ActivityNotFoundException failure){offerFullUpdate(release,tag);}
+                });
+            }catch(Exception failure){ui(()->{applyingUpdate=false;offerFullUpdate(release,tag);});}
+        });
+    }
+    private void offerFullUpdate(JSONObject release,String tag){
+        if(status!=null)status.setText("当前版本可使用完整安装包更新。");
+        new AlertDialog.Builder(activity).setTitle("下载完整安装包？")
+            .setMessage("当前版本没有可用的增量包，或增量校验未通过。")
+            .setNegativeButton("取消",null).setPositiveButton("下载",(dialog,which)->download(release.optJSONObject("android"),tag)).show();
+    }
     private void download(JSONObject asset,String tag){
         if(asset==null||UpdatePolicy.downloadUrl(asset.optString("url")).isEmpty()){toast("此版本尚无安卓安装包");return;}
         int existing=state();if(tag.equals(preferences.getString("downloadTag",""))&&(existing==DownloadManager.STATUS_PENDING||existing==DownloadManager.STATUS_RUNNING||existing==DownloadManager.STATUS_PAUSED||existing==DownloadManager.STATUS_SUCCESSFUL)){downloads();return;}

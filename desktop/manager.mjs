@@ -8,6 +8,7 @@ import { ConfigStore, addresses, validateConfig } from './config.mjs';
 import { GatewayRuntime } from './runtime.mjs';
 import { EasyTierManager } from './easytier.mjs';
 import { pairingInfo } from './pairing.mjs';
+import { checkDesktopUpdate, desktopUpdateStatus, startDesktopUpdate } from './update.mjs';
 import { desktopVersion } from './version.mjs';
 const fail = (status, message) => Object.assign(Error(message), { status });
 const safeEqual = (a, b) => typeof a === 'string' && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -18,7 +19,7 @@ export async function createManager({ root, assets, binDir, port = 19547, runtim
   const cancelRestore = () => { ++restoreGeneration; clearTimeout(restoreTimer); restoreTimer = null; recovery = { state: 'idle', attempts: 0, nextRetryAt: null }; };
   const enqueue = operation => { const pending = mutation.catch(() => {}).then(operation); mutation = pending; return pending; };
   const record = message => { events.push({ at: new Date().toISOString(), message }); if (events.length > 50) events.shift(); };
-  const status = async () => ({ kind: 'codex-lan-manager', version: desktopVersion, config: await store.public(), addresses: addresses(), gateway: runtime.status(), easytier: easytier.status(), recovery: { ...recovery }, events });
+  const status = async () => ({ kind: 'codex-lan-manager', version: desktopVersion, config: await store.public(), addresses: addresses(), gateway: runtime.status(), easytier: easytier.status(), recovery: { ...recovery }, update: await desktopUpdateStatus(root), events });
   const startConfigured = async () => {
     const saved = await store.load(); if (!saved) throw Error('请先保存连接配置');
     const config = { ...validateConfig(saved), secretCipher: saved.secretCipher };
@@ -77,6 +78,7 @@ export async function createManager({ root, assets, binDir, port = 19547, runtim
         reply(200, await readFile(join(assets, name), 'utf8'), name.endsWith('.html') ? 'text/html; charset=utf-8' : name.endsWith('.js') ? 'text/javascript; charset=utf-8' : 'text/css; charset=utf-8'); return;
       }
       if (!safeEqual(request.headers.authorization || '', 'Bearer ' + token)) throw fail(401, '请通过插件入口重新打开设置页面');
+      if (request.method === 'GET' && url.pathname === '/api/update') { reply(200, await checkDesktopUpdate()); return; }
       if (request.method === 'GET' && url.pathname === '/api/status') { reply(200, await status()); return; }
       if (request.method !== 'POST') throw fail(404, '接口不存在');
       if (!request.headers['content-type']?.startsWith('application/json')) throw fail(415, '需要 JSON 请求');
@@ -110,6 +112,7 @@ export async function createManager({ root, assets, binDir, port = 19547, runtim
         }
         if (url.pathname === '/api/revoke') { if (!runtime.active) throw Error('服务尚未运行'); const value = await runtime.active.gateway.revokeDevice(input.id); record('已撤销一台手机的授权'); return value; }
         if (url.pathname === '/api/easytier-stop') { cancelRestore(); if (runtime.active?.config.mode === 'bundled') await runtime.stop(); await easytier.stop(); record('受管 EasyTier 已停止'); return status(); }
+        if (url.pathname === '/api/update') return startDesktopUpdate(root, runtime.status().running);
         if (url.pathname === '/api/shutdown') { cancelRestore(); setTimeout(onShutdown, 100); return { stopping: true }; }
         if (url.pathname === '/api/elevate') {
           const script = fileURLToPath(new URL('../scripts/start-desktop-plugin.ps1', import.meta.url));

@@ -116,6 +116,20 @@ $('lanAdapter').onchange = () => { if ($('lanAdapter').value) $('lanIp').value =
 
 document.addEventListener('visibilitychange', () => { if (document.hidden) clearPairing(); });
 document.querySelectorAll('[data-section]').forEach(button => button.onclick = () => $(button.dataset.section).scrollIntoView({ behavior: 'smooth', block: 'center' }));
+$('desktopUpdate').onclick = async () => {
+  const button = $('desktopUpdate');
+  button.disabled = true;
+  try {
+    const update = await call('update');
+    if (latest?.update?.state === 'failed') feedback('上次增量未完成，已尝试恢复旧版本。');
+    if (!update.available) { feedback('已是最新电脑版本'); return; }
+    if (!update.patch) { window.open(update.page, '_blank', 'noopener'); return; }
+    if (!window.confirm('下载电脑插件 '+update.version+' 的增量并重启手机连接服务？')) return;
+    await call('update', {});
+    feedback('增量已校验，正在重启网关。请稍后从桌面重新打开手机连接设置。');
+  } catch (error) { feedback(error.message); }
+  finally { button.disabled = false; }
+};
 $('settingsHelp').onclick = () => feedback('在 Windows 开始菜单搜索“手机连接设置”，或使用桌面同名快捷方式。设置地址的访问凭据会自动获取，不需要保存网址或向聊天发送指令。旧版安装可重新运行新版安装器来创建入口。');
 function backendUnavailable(error) {
   $('badge').textContent = '后台连接已中断'; $('activeMode').textContent = '连接状态待确认';

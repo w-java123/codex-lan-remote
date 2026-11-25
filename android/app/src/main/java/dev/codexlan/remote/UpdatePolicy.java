@@ -6,7 +6,7 @@ import java.util.regex.*;
 
 /** Public release metadata only. No desktop credentials enter GitHub requests. */
 final class UpdatePolicy {
-    static final String REPO="fabulouszcc/codex-lan-remote";
+    static final String REPO="w-java123/codex-lan-remote";
     static final String PAGE="https://github.com/"+REPO+"/releases";
     static final Pattern VERSION=Pattern.compile("^v?(\\d{1,6})\\.(\\d{1,6})\\.(\\d{1,6})(?:-([0-9A-Za-z.-]+))?(?:\\+[0-9A-Za-z.-]+)?$");
     static int[] numbers(String value){Matcher m=VERSION.matcher(value);if(!m.matches())return null;return new int[]{Integer.parseInt(m.group(1)),Integer.parseInt(m.group(2)),Integer.parseInt(m.group(3))};}
@@ -25,7 +25,21 @@ final class UpdatePolicy {
     static JSONObject release(String tag,String notes,JSONArray assets)throws Exception {
         if(numbers(tag)==null)return null;JSONObject result=new JSONObject().put("tag",tag).put("page",PAGE+"/tag/"+tag).put("notes",notes==null?"":notes.substring(0,Math.min(12000,notes.length())));
         for(int i=0;i<assets.length();i++){JSONObject asset=assets.optJSONObject(i);if(asset==null)continue;String name=asset.optString("name").toLowerCase(java.util.Locale.ROOT);if(downloadUrl(asset.optString("url")).isEmpty())continue;if(name.startsWith("codex-lan-")&&name.endsWith(".apk")&&!name.contains("x86")&&!name.contains("armeabi")&&!result.has("android"))result.put("android",asset);if(name.startsWith("codex-lan-desktop-")&&name.endsWith(".zip")&&!result.has("desktop"))result.put("desktop",asset);}
-        Matcher marker=Pattern.compile("<!--\\s*codex-lan-update:\\s*(\\{[^>]+\\})\\s*-->").matcher(notes==null?"":notes);if(marker.find())try{String min=new JSONObject(marker.group(1)).optString("minDesktopVersion");if(numbers(min)!=null)result.put("minDesktopVersion",min);}catch(Exception ignored){}
+        JSONObject patches=new JSONObject();
+        for(int i=0;i<assets.length();i++){
+            JSONObject item=assets.optJSONObject(i);
+            if(item==null||downloadUrl(item.optString("url")).isEmpty())continue;
+            Matcher patch=Pattern.compile("^codex-lan-android-from-([a-f0-9]{64})\\.cld$").matcher(item.optString("name"));
+            if(patch.matches())patches.put(patch.group(1),item);
+            if("Codex-LAN-Windows-x64-Setup.exe".equalsIgnoreCase(item.optString("name")))result.put("desktop",item);
+        }
+        result.put("patches",patches);
+        Matcher marker=Pattern.compile("<!--\\s*codex-lan-update:\\s*(\\{[^>]+\\})\\s*-->").matcher(notes==null?"":notes);if(marker.find())try{String min=new JSONObject(marker.group(1)).optString("minDesktopVersion");if(numbers(min)!=null)result.put("minDesktopVersion",min);
+            JSONObject metadata=new JSONObject(marker.group(1));
+            for(String key:new String[]{"androidVersion","desktopVersion"}){
+                String value=metadata.optString(key);
+                if(numbers(value)!=null)result.put(key,value);
+            }}catch(Exception ignored){}
         return result;
     }
     static JSONObject latest(JSONArray values,String installed)throws Exception {

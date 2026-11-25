@@ -1,5 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$BundleDirectory,
-      [Parameter(Mandatory=$true)][string]$OutputDirectory)
+      [Parameter(Mandatory=$true)][string]$OutputDirectory,
+      [string]$PreviousBundleDirectory)
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path "$PSScriptRoot/..").Path
 $stage = Join-Path $OutputDirectory ('bundle-' + [guid]::NewGuid().ToString('N'))
@@ -30,8 +31,24 @@ foreach($file in Get-ChildItem $stage -Recurse -Force -File) {
 }
 $taskCompiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
 $taskSharedLauncher = Join-Path $plugin 'runtime/CodexLanSharedLaunch.exe'
-& $taskCompiler /nologo /target:winexe /platform:x64 /codepage:65001 "/out:$taskSharedLauncher" /r:System.Windows.Forms.dll (Join-Path $PSScriptRoot 'windows-shared-launcher.cs')
-if ($LASTEXITCODE -ne 0) { throw '共享控制启动程序编译失败' }
+$taskLauncherSource = Join-Path $PSScriptRoot 'windows-shared-launcher.cs'
+$taskLauncherSourceHash = (Get-FileHash -LiteralPath $taskLauncherSource -Algorithm SHA256).Hash
+$taskLauncherMarker = 'runtime/shared-launcher-source.sha256'
+$taskPriorPlugin = if ($PreviousBundleDirectory) { Join-Path $PreviousBundleDirectory 'plugins/codex-lan-desktop' }
+$taskPriorLauncher = if ($taskPriorPlugin) { Join-Path $taskPriorPlugin 'runtime/CodexLanSharedLaunch.exe' }
+if ($taskPriorPlugin -and (Test-Path -LiteralPath (Join-Path $taskPriorPlugin $taskLauncherMarker)) -and
+    (Get-Content -LiteralPath (Join-Path $taskPriorPlugin $taskLauncherMarker) -Raw).Trim() -eq $taskLauncherSourceHash -and
+    (Test-Path -LiteralPath $taskPriorLauncher)) {
+    $priorHashes = Get-Content -LiteralPath (Join-Path $taskPriorPlugin 'dependency-hashes.json') -Raw | ConvertFrom-Json
+    if ((Get-FileHash -LiteralPath $taskPriorLauncher -Algorithm SHA256).Hash -ne $priorHashes.'CodexLanSharedLaunch.exe') {
+        throw '上一发行版的共享启动器校验失败'
+    }
+    Copy-Item -LiteralPath $taskPriorLauncher -Destination $taskSharedLauncher -Force
+} else {
+    & $taskCompiler /nologo /target:winexe /platform:x64 /codepage:65001 "/out:$taskSharedLauncher" /r:System.Windows.Forms.dll $taskLauncherSource
+    if ($LASTEXITCODE -ne 0) { throw '共享控制启动程序编译失败' }
+}
+[IO.File]::WriteAllText((Join-Path $plugin $taskLauncherMarker), $taskLauncherSourceHash)
 $launcherHashes = Join-Path $plugin 'dependency-hashes.json'
 $launcherManifest = Get-Content -LiteralPath $launcherHashes -Raw | ConvertFrom-Json
 $launcherDigest = (Get-FileHash -LiteralPath $taskSharedLauncher -Algorithm SHA256).Hash.ToLowerInvariant()
