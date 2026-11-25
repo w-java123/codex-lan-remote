@@ -33,7 +33,7 @@ export class DesktopBridge extends EventEmitter {
       this.catalogAt = 0;
       this.emit('sidebarChanged');
       const entry=this.entries.get(this.desktopSelection?.id);
-      if(entry?.ready)void this.refreshQueue(entry,this.generation);
+      if(entry)void this.refreshQueue(entry,this.generation);
     });
     this.clientFactory = clientFactory;
     this.generation = 0;
@@ -169,6 +169,7 @@ export class DesktopBridge extends EventEmitter {
     const selection = activate ? (this.desktopSelection = {id, startedAt: Date.now()}) : null;
     if (this.entries.has(id)) {
       const entry = this.entries.get(id);
+      if(activate)void this.refreshQueue(entry,this.generation);
       if (entry.ready) { this.recordSelectionReady(entry); return; }
       this.entries.delete(id);this.entries.set(id,entry);
       void this.hydrate(entry, this.generation, selection); return;
@@ -182,6 +183,7 @@ export class DesktopBridge extends EventEmitter {
     }
     const entry = { ...row, writable: this.allowSelectedChats, history: [], store: new ThreadState(), ready: false, consumed: new Set() };
     this.entries.set(id, entry);
+    if(activate)void this.refreshQueue(entry,this.generation);
     if (entry.writable) this.client?.enableThreadControl(id);
     this.emit('changed');
     void this.hydrate(entry, this.generation, selection);
@@ -426,9 +428,14 @@ export class DesktopBridge extends EventEmitter {
     if(!this.historyReader?.queuedMessages||this.closed||generation!==this.generation)return;
     if(entry.queueLoading){entry.queueReload=true;return;}
     entry.queueLoading=true;const epoch=entry.queueEpoch||0;
+    const publish=queue=>{
+      if(this.closed||generation!==this.generation||this.entries.get(entry.id)!==entry||
+          (entry.queueEpoch||0)!==epoch||entry.nativeQueue===queue)return;
+      entry.nativeQueue=queue;
+      this.emit('changed');
+    };
     try{
-      const queue=await this.historyReader.queuedMessages(entry.id,this.liveQueueRequest(entry));
-      if(!this.closed&&generation===this.generation&&this.entries.get(entry.id)===entry&&(entry.queueEpoch||0)===epoch){entry.nativeQueue=queue;this.emit('changed');}
+      publish(await this.historyReader.queuedMessages(entry.id,this.liveQueueRequest(entry),publish));
     }catch{/* A temporary read failure must not erase the last observed queue. */}
     finally{
       entry.queueLoading=false;

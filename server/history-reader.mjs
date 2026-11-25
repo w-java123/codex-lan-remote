@@ -92,8 +92,15 @@ export class HistoryReader {
   async localQueuedMessages(threadId){
     const sidebar=await this.sidebarReader();const rows=sidebar['queued-follow-ups']?.[threadId];return Array.isArray(rows)?rows:[];
   }
-  async queuedMessages(threadId, liveRequest){
-    const local=await this.localQueuedMessages(threadId);let server=[];
+  async queuedMessages(threadId, liveRequest, onLocal){
+    const local=await this.localQueuedMessages(threadId);
+    const merge=server=>{
+      const known=new Set(server.flatMap(row=>[row.id,row.clientUserMessageId]).filter(Boolean));
+      return [...server,...local.filter(row=>typeof row?.id==='string'&&!known.has(row.id))];
+    };
+    const previous=merge(this.serverQueues?.get(threadId)||[]);
+    if(liveRequest)onLocal?.(previous);
+    let server=[];
     if(liveRequest||this.serverQueueSupported!==false){
       try{
         if(!liveRequest)await this.connect();let cursor;const seen=new Set();
@@ -104,13 +111,11 @@ export class HistoryReader {
         }while(cursor&&server.length<100);
         this.serverQueues??=new Map();this.serverQueues.set(threadId,server);
       }catch(error){
-        if(liveRequest)throw error;
-        if(error.code===-32601)this.serverQueueSupported=false;
-        else server=this.serverQueues?.get(threadId)||[];
+        if(liveRequest||error.code!==-32601)return previous;
+        this.serverQueueSupported=false;
       }
     }
-    const clients=new Set(server.map(row=>row.clientUserMessageId));
-    return [...server,...local.filter(row=>!clients.has(row.id))];
+    return merge(server);
   }
   hasNativeQueue(threadId){
     return this.serverQueues?.has(threadId)===true;
