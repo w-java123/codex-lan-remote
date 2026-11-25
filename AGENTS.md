@@ -8,4 +8,4 @@ Follow the user's global AGENTS.md directory and local-configuration conventions
 - EasyTier node status includes configuration secrets. Persist and display only explicitly selected status fields.
 - Keep machine paths, generated schemas, probe outputs, credentials and personal configuration local and ignored.
 - A bundled EasyTier instance and an existing system instance have separate ownership. Manage only the instance explicitly selected by the user.
-- When user-facing usage changes, update the affected steps in the project README.md in the same change. Check the documented steps against the current behavior before committing.
+
