@@ -56,7 +56,7 @@
 - **手机连接设置**：首次使用时配置网络、保存并启用连接，再生成二维码供手机扫码配对。
 - **Codex 手机共享控制**：日常启动 Codex 和手机连接网关。如果已用普通入口打开 Codex，先等当前任务结束，从桌面菜单正常退出，再用这个快捷方式打开。
 
-如果电脑只安装了 Microsoft Store 版 Codex，且本机还没有 Codex CLI 目录，v0.5.1 安装器可能在创建快捷方式前提示找不到 Codex。
+Windows 安装器支持只安装 Microsoft Store 版 Codex 的电脑。安装器会读取 Windows 已注册的 Codex 安装路径，无需先打开 Codex 生成本地 CLI 目录。
 
 同一发行版提供 Android APK 和校验清单。已经安装旧版的用户先覆盖安装支持增量更新的版本。后续在电脑的「手机连接设置」或手机的「检测更新」里检查新版。[发行版与增量更新](https://github.com/w-java123/codex-lan-remote/blob/codex/personal-release/docs/发行版与增量更新.md)
 
