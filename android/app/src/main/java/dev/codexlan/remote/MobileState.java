@@ -112,7 +112,7 @@ final class MobileState {
     }
     static String unavailableReason(JSONObject state, JSONObject thread, boolean sending) {
         if (sending) return "正在提交，请稍候…";
-        if (state == null || !state.optBoolean("online")) return "连接中断，请检查 EasyTier 或重新连接";
+        if (state == null || !state.optBoolean("online")) return UsagePresentation.syncNotice(state);
         if (thread == null) return "正在加载所选聊天，请稍候";
         if (!thread.optBoolean("ready")) return "active".equals(thread.optString("runtimeStatus"))
             ? "电脑正在执行，任务结束后可发送" : "聊天历史可读，请先在电脑打开该聊天，或点击重新同步";

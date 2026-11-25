@@ -19,8 +19,25 @@ final class UsagePresentation {
     static String percent(JSONObject window) {
         float value=remaining(window);return value<0?"暂不可用":Math.round(value)+"% 剩余";
     }
+    static String syncNotice(JSONObject state) {
+        if(state!=null&&state.optBoolean("online"))return "";
+        String phase=state==null?"":state.optString("syncPhase");
+        switch(phase){
+            case "sync-retry":return "已连接电脑 · 正在重试同步聊天";
+            case "reconnecting":return "正在重新连接电脑";
+            case "unreachable":return "暂未连上电脑 · 正在重试";
+            case "authorization":return "电脑未接受设备授权";
+            case "stopped":return "后台同步已停止";
+            default:return "正在连接电脑并同步聊天";
+        }
+    }
     static String connection(JSONObject state,JSONObject thread,String message,boolean sending,String sendMode) {
         if(state==null)return "connecting";
+        if(!state.optBoolean("online")&&state.has("syncPhase")){
+            String phase=state.optString("syncPhase");
+            if("authorization".equals(phase)||"unreachable".equals(phase))return "error";
+            return "stopped".equals(phase)?"offline":"connecting";
+        }
         if(!state.optBoolean("online"))return message!=null&&(message.contains("中断")||message.contains("失败")||message.contains("无法"))?"error":"offline";
         if("none".equals(MobileState.composerAction(state,thread,sending,"text",sendMode)))return "waiting";
         if((thread.optJSONArray("approvals")!=null&&thread.optJSONArray("approvals").length()>0)||(thread.optJSONArray("questions")!=null&&thread.optJSONArray("questions").length()>0))return "waiting";

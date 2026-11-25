@@ -29,6 +29,19 @@ public final class SessionService extends Service {
     private volatile long refreshVersion;
     private volatile RemoteApi api;
     private HistoryCache cache;
+    private final ExecutorService cacheWorker=Executors.newSingleThreadExecutor();
+    private final java.util.concurrent.atomic.AtomicBoolean saveQueued=new java.util.concurrent.atomic.AtomicBoolean();
+
+    private void saveHistory(){
+        if(stopped||!saveQueued.compareAndSet(false,true))return;
+        try { cacheWorker.execute(()->{
+            saveQueued.set(false);
+            if(stopped)return;
+            try{cache.save(latest);}catch(Exception error){
+                android.util.Log.w("CodexLanSync","cache write failed: "+error.getClass().getSimpleName());
+            }
+        }); } catch(java.util.concurrent.RejectedExecutionException ignored){saveQueued.set(false);}
+    }
     private final ExecutorService catalogWorker=Executors.newSingleThreadExecutor();
     private final java.util.concurrent.atomic.AtomicBoolean catalogLoading=new java.util.concurrent.atomic.AtomicBoolean();
     private volatile JSONArray catalogRows=new JSONArray();
@@ -83,7 +96,7 @@ public final class SessionService extends Service {
     private void broadcast() { sendBroadcast(new Intent(UPDATE).setPackage(getPackageName())); }
     private void initializeSync(){
         try{latest=MobileState.offline(cache.load());}catch(Exception damaged){latest=new JSONObject();}
-        try{latest.put("computer",api.fingerprint);}catch(Exception ignored){}
+        try{latest.put("computer",api.fingerprint).put("syncPhase","starting");}catch(Exception ignored){}
         if(selection.isEmpty())selection=latest.optString("selectedThreadId");broadcast();poll();
     }
     private final Object pollLock = new Object();
@@ -127,20 +140,22 @@ public final class SessionService extends Service {
                         JSONObject history=channel.call("GET","/v1/history?threadId="+java.net.URLEncoder.encode(id,"UTF-8"),null,null).getJSONObject("thread");
                         if(stopped||owner!=api||epoch!=refreshVersion)break;
                         synchronized(stateLock){latest=MobileState.mergeHistory(latest,history).put("catalog",rows);}
-                        if(i%5==0){cache.save(latest);broadcast();}
+                        if(i%5==0){saveHistory();broadcast();}
                     }catch(Exception unavailable){if(unavailable.getMessage()!=null&&unavailable.getMessage().contains("不支持"))break;}
                 }
-                if(!stopped&&owner==api){cache.save(latest);broadcast();}
+                if(!stopped&&owner==api){saveHistory();broadcast();}
             }
         }catch(Exception ignored){}finally{if(owner==api&&epoch==refreshVersion)catalogFetchedAt=System.currentTimeMillis();channel.cancel();catalogApi=null;catalogLoading.set(false);}});
     }
     private void poll() {
         String version = "", opened = ""; long savedAt = 0, refreshed = refreshVersion;
         long timedEpoch = -1;
+        int transportFailures=0;
         JSONArray cachedCatalog=latest.optJSONArray("catalog");if(cachedCatalog!=null)catalogRows=cachedCatalog;
         while (!stopped) {
             long epoch=refreshVersion;String requestedSelection=selection;RemoteApi owner=api;
             RemoteApi polling=null;
+            boolean gatewayResponded=false;
             try {
                 polling=owner.readChannel();
                 synchronized(pollLock){pollApi=polling;}
@@ -149,13 +164,13 @@ public final class SessionService extends Service {
                 boolean selecting = !desired.isEmpty() && !desired.equals(opened);
                 if (refreshed != refreshVersion) { refreshed = refreshVersion; version = ""; opened = ""; catalogFetchedAt = 0; }
                 if (!desired.isEmpty() && !desired.equals(opened)) {
-                    try{polling.call("POST", "/v1/select", new JSONObject().put("threadId", desired), null);opened=desired;}
+                    try{polling.call("POST", "/v1/select", new JSONObject().put("threadId", desired), null);gatewayResponded=true;opened=desired;}
                     catch(RemoteApi.ApiException error){
                         if(error.status!=404)throw error;
                         JSONArray available=polling.call("GET","/v1/threads",null,null).getJSONArray("threads");
                         if(MobileState.pollObsolete(epoch,refreshVersion,requestedSelection,selection,owner==api))continue;
                         String replacement=MobileState.replacementSelection(available,desired);catalogRows=available;recoveredSelectionFrom=desired;selection=replacement;
-                        refreshVersion++;synchronized(stateLock){latest=MobileState.copyFields(latest).put("catalog",available).put("selectedThreadId",replacement).put("recoveredSelectionFrom",desired).put("online",true);}cache.save(latest);broadcast();version="";opened="";continue;
+                        refreshVersion++;synchronized(stateLock){latest=MobileState.copyFields(latest).put("catalog",available).put("selectedThreadId",replacement).put("recoveredSelectionFrom",desired).put("online",true);}saveHistory();broadcast();version="";opened="";continue;
                     }
                     version = "";
                 }
@@ -163,12 +178,15 @@ public final class SessionService extends Service {
                 long stateRequestedAt = android.os.SystemClock.elapsedRealtime();
                 JSONObject incoming = polling.call("GET", "/v1/state?delta=1" + (version.isEmpty() ? "" : "&after=" + version), null, null);
                 if(MobileState.pollObsolete(epoch,refreshVersion,requestedSelection,selection,owner==api))continue;
+                gatewayResponded=true;
                 long stateReceivedAt = android.os.SystemClock.elapsedRealtime();
-                version = String.valueOf(incoming.getLong("version"));
+                String receivedVersion=String.valueOf(incoming.getLong("version"));
                 JSONObject previous,merged;
                 synchronized(stateLock){if(MobileState.pollObsolete(epoch,refreshVersion,requestedSelection,selection,owner==api))continue;previous=latest;merged=MobileState.merge(previous,incoming);
                     if((selection==null||selection.isEmpty())&&recoveredSelectionFrom.isEmpty()){JSONArray threads=merged.optJSONArray("threads");if(threads!=null&&threads.length()>0)selection=threads.getJSONObject(0).getString("id");}
                     merged.put("selectedThreadId",selection).put("recoveredSelectionFrom",recoveredSelectionFrom).put("catalog",catalogRows).put("online",true).put("computer",api.fingerprint);latest=merged;}
+                version=receivedVersion;
+                transportFailures=0;
                 JSONArray arrived=incoming.optJSONArray("threads");if(arrived!=null)for(int i=0;i<arrived.length();i++){JSONObject row=arrived.getJSONObject(i);if(selection.equals(row.optString("id"))&&row.optBoolean("historyReady")){if(foregroundSyncedEpoch!=epoch||!selection.equals(foregroundSyncedSelection))catalogFetchedAt=0;foregroundSyncedEpoch=epoch;foregroundSyncedSelection=selection;break;}}
                 message = "已连接";
                 broadcast();
@@ -185,23 +203,44 @@ public final class SessionService extends Service {
                         }
                     }
                 }
-                notifications.update(previous, merged); rememberConnectedLan(owner);
-                if (MobileState.alerts(previous, merged).length() > 0 || System.currentTimeMillis() - savedAt > 10000) {
-                    try { cache.save(latest); savedAt = System.currentTimeMillis(); }
-                    catch (Exception cacheError) { message = "已连接，但本地历史保存失败"; }
+                boolean hasAlerts=false;
+                try {
+                    notifications.update(previous,merged);
+                    hasAlerts=MobileState.alerts(previous,merged).length()>0;
+                } catch(Exception error) {
+                    android.util.Log.w("CodexLanSync","notification update failed: "+error.getClass().getSimpleName());
+                }
+                rememberConnectedLan(owner);
+                if (hasAlerts || System.currentTimeMillis() - savedAt > 10000) {
+                    saveHistory();savedAt=System.currentTimeMillis();
                 }
                 // One brief success notice per sync session; polling/reconnection never reposts it.
-                if (!connectionAnnounced) { connectionAnnounced = true; notifications.connected(); }
+                if (!connectionAnnounced) {
+                    connectionAnnounced=true;
+                    try{notifications.connected();}catch(RuntimeException ignored){}
+                }
                 if (!"已连接".equals(message)) broadcast();
                 refreshCatalog(owner,epoch);refreshUsage(owner);
             } catch (Exception error) {
                 if (stopped) break;
                 if(MobileState.pollObsolete(epoch,refreshVersion,requestedSelection,selection,owner==api)){version="";opened="";continue;}
-                if(tryRememberedAddress(owner)){version="";opened="";continue;}
-                try { synchronized(stateLock){latest=MobileState.offline(latest);}notifications.disconnected(); } catch (Exception ignored) {}
-                message = "连接中断，正在重连"; broadcast();
-                try { Thread.sleep(2000); } catch (InterruptedException ignored) { break; }
-                version = ""; opened = "";
+                boolean unauthorized=error instanceof RemoteApi.ApiException&&((RemoteApi.ApiException)error).status==401;
+                boolean reached=gatewayResponded||error instanceof RemoteApi.ApiException||error instanceof org.json.JSONException;
+                transportFailures=reached?0:transportFailures+1;
+                if(transportFailures>=2&&tryRememberedAddress(owner)){version="";opened="";continue;}
+                String phase=unauthorized?"authorization":reached?"sync-retry":transportFailures==1?"reconnecting":"unreachable";
+                try {
+                    synchronized(stateLock){
+                        JSONObject snapshot=latest.optBoolean("online")?MobileState.offline(latest):MobileState.copyFields(latest);
+                        latest=snapshot.put("syncPhase",phase);
+                    }
+                    notifications.disconnected();
+                } catch (Exception ignored) {}
+                message=UsagePresentation.syncNotice(latest);broadcast();
+                android.util.Log.w("CodexLanSync","retry "+phase+": "+error.getClass().getSimpleName());
+                try { Thread.sleep(transportFailures==1?300:2000); } catch (InterruptedException ignored) { break; }
+                version = "";
+                if(!reached||unauthorized)opened="";
             } finally { synchronized(pollLock){if(pollApi==polling)pollApi=null;}if(polling!=null)polling.cancel(); }
         }
     }
@@ -215,7 +254,14 @@ public final class SessionService extends Service {
     }
     @Override public void onDestroy() {
         stopped = true;cancelPoll(); if (api != null) api.cancel(); if (notifications != null) notifications.disconnected();
-        try { if (latest != null) latest = MobileState.offline(latest); if (cache != null && latest != null) cache.save(latest); } catch (Exception ignored) {}
+        try {
+            if(latest!=null)latest=MobileState.offline(latest).put("syncPhase","stopped");
+            JSONObject finalSnapshot=latest;
+            if(cache!=null&&finalSnapshot!=null)cacheWorker.execute(()->{
+                try{cache.save(finalSnapshot);}catch(Exception ignored){}
+            });
+        } catch(Exception ignored){}
+        cacheWorker.shutdown();
         if(usageApi!=null)usageApi.cancel();usageWorker.shutdownNow();if(catalogApi!=null)catalogApi.cancel();catalogWorker.shutdownNow();worker.shutdownNow(); stopForeground(STOP_FOREGROUND_REMOVE); message = "后台同步已停止"; broadcast(); super.onDestroy();
     }
 }

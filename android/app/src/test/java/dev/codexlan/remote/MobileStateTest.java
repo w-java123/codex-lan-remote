@@ -448,7 +448,7 @@ public class MobileStateTest {
         thread.put("ready", false);
         assertTrue(MobileState.unavailableReason(online, thread, false).contains("电脑打开"));
         assertTrue(MobileState.unavailableReason(online, null, false).contains("加载"));
-        assertTrue(MobileState.unavailableReason(MobileState.offline(online), thread, false).contains("连接中断"));
+        assertEquals("正在连接电脑并同步聊天",MobileState.unavailableReason(MobileState.offline(online),thread,false));
     }
     private JSONObject state(String status, String text, boolean ready) throws Exception {
         JSONObject turn = new JSONObject().put("id", "turn-1").put("status", status).put("input", "remember BLUE-731")

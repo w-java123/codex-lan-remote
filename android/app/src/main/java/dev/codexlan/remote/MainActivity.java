@@ -489,8 +489,8 @@ public final class MainActivity extends Activity {
         RemoteApi client = api;
         worker.execute(() -> {
             try {
-                JSONObject cached = MobileState.offline(new HistoryCache(this, client.fingerprint).load());
-                runOnUiThread(() -> { if (api != client || isDestroyed() || (currentState != null && currentState.optBoolean("online"))) return; try { render(cached); } catch (Exception ignored) {} });
+                JSONObject cached = MobileState.offline(new HistoryCache(this, client.fingerprint).load()).put("syncPhase","starting");
+                runOnUiThread(() -> { if (api != client || isDestroyed() || currentState != null) return; try { render(cached); } catch (Exception ignored) {} });
             } catch (Exception error) { runOnUiThread(() -> { if (api == client) status.setText("本地缓存读取失败，将重新同步电脑历史"); }); }
         });
     }
@@ -622,11 +622,11 @@ public final class MainActivity extends Activity {
         updateUsageIndicator();
         updateQuestionCards();
         if (currentThread == null) {
-            status.setText(state.optBoolean("online") ? "正在加载所选聊天历史…" : "离线 · 暂无该聊天的本地记录");
+            status.setText(state.optBoolean("online") ? "已连接电脑 · 正在同步所选聊天" : UsagePresentation.syncNotice(state));
             renderRevision++;renderHandler.removeCallbacks(prepareRows);deferredRows=null;chatAdapter.replace(java.util.Collections.emptyList());jumpRail.entries(java.util.Collections.emptyList());jumpRail.cancel();railChat="";setButtons(false);displayedChat="";return;
         }
         selectChat.setText(currentThread.optString("name", "Codex"));
-        status.setText(!state.optBoolean("online") ? "离线 · 显示本地保存记录 · " + SessionService.message
+        status.setText(!state.optBoolean("online") ? UsagePresentation.syncNotice(state)+" · 显示本地记录"
             : !currentThread.optBoolean("writable",true)&&currentThread.optBoolean("ready") ? "已连接 · 此聊天仅可读取"
             : "active".equals(currentThread.optString("runtimeStatus"))&&!currentThread.optBoolean("ready") ? "已连接 · 电脑正在执行"
             : currentThread.optBoolean("ready") ? (currentThread.optJSONArray("approvals")!=null&&currentThread.optJSONArray("approvals").length()>0?"等待审批":currentThread.optJSONArray("questions")!=null&&currentThread.optJSONArray("questions").length()>0?"等待回复":!MobileState.activeTurnId(currentThread).isEmpty()?"正在处理":"已连接电脑")
@@ -635,7 +635,7 @@ public final class MainActivity extends Activity {
         status.append(" · "+networkModeLabel());
         updateModelChoice();
         setButtons(currentThread.optBoolean("ready"));loadModels(false);
-        renderRevision++;if(!currentThread.optString("id").equals(displayedChat))deferredRows=null;if(!renderHandler.hasCallbacks(prepareRows))renderHandler.postDelayed(prepareRows,100);
+        renderRevision++;if(!currentThread.optString("id").equals(displayedChat))deferredRows=null;scheduleRows();
     }
     private String connectionPresentation(){return UsagePresentation.connection(currentState,currentThread,SessionService.message,isSending(),sendMode());}
     private void updateConnectionDot(){
@@ -1339,7 +1339,7 @@ public final class MainActivity extends Activity {
         if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(updates, filter, RECEIVER_NOT_EXPORTED); else registerReceiver(updates, filter);
         refreshPairingUi();
         if(api==null&&connectionGuideVisible&&!PairingCoordinator.busy()&&!PairingCoordinator.failed())try{JSONObject pending=PairingCoordinator.pending(this);if(pending!=null&&"waiting".equals(pending.optString("phase"))&&EasyTierVpnService.permissionIntent(this)==null)PairingCoordinator.start(this);}catch(Exception ignored){}
-        if (api != null) {restoreSavedNetwork();beginPolling(true);}
+        if (api != null) {restoreSavedNetwork();beginPolling();}
         renderHandler.post(themeClock);
     }
     @Override protected void onPause(){
