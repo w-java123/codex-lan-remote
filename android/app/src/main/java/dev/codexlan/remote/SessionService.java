@@ -205,8 +205,9 @@ public final class SessionService extends Service {
                 }
                 boolean hasAlerts=false;
                 try {
-                    notifications.update(previous,merged);
-                    hasAlerts=MobileState.alerts(previous,merged).length()>0;
+                    JSONArray alerts=MobileState.alerts(previous,merged);
+                    hasAlerts=alerts.length()>0;
+                    notifications.update(alerts);
                 } catch(Exception error) {
                     android.util.Log.w("CodexLanSync","notification update failed: "+error.getClass().getSimpleName());
                 }

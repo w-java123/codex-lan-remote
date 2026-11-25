@@ -99,8 +99,8 @@ final class ChatFiles {
             try{
                 File root=previewCache();
                 File local=new File(root,filename);if(local.isFile()&&System.currentTimeMillis()-local.lastModified()<60000)return local;
-                byte[] bytes=channel.file(chat,ref.optString("id"));File temporary=File.createTempFile("preview-",".tmp",root);
-                try{try(FileOutputStream out=new FileOutputStream(temporary)){out.write(bytes);}if(!temporary.renameTo(local))throw new IOException("保存预览失败");}finally{temporary.delete();}
+                File temporary=File.createTempFile("preview-",".tmp",root);
+                try{try(FileOutputStream out=new FileOutputStream(temporary)){channel.file(chat,ref.optString("id"),out);}if(!temporary.renameTo(local))throw new IOException("保存预览失败");}finally{temporary.delete();}
                 trimCache(root,local);
                 return local;
             }catch(Exception e){throw new CompletionException(e);}finally{channels.remove(channel);channel.cancel();}

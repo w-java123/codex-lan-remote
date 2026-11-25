@@ -104,16 +104,29 @@ final class RemoteApi {
             return result;
         } finally { connections.remove(connection); connection.disconnect(); }
     }
-    byte[] file(String threadId,String id) throws Exception {
+    void file(String threadId,String id,java.io.OutputStream target) throws Exception {
         String path="/v1/file?threadId="+java.net.URLEncoder.encode(threadId,"UTF-8")+"&id="+java.net.URLEncoder.encode(id,"UTF-8");
         HttpsURLConnection connection=connection(path);connections.add(connection);
         try{
             connection.setSSLSocketFactory(socketFactory);connection.setHostnameVerifier(verifier);connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(8000);connection.setReadTimeout(60000);connection.setRequestProperty("Authorization","Bearer "+token);
             int status=connection.getResponseCode();
             if(status!=200){try(InputStream input=connection.getErrorStream()){ByteArrayOutputStream bytes=new ByteArrayOutputStream();if(input!=null){byte[] block=new byte[1024];int count;while(bytes.size()<4096&&(count=input.read(block,0,Math.min(block.length,4096-bytes.size())))!=-1)bytes.write(block,0,count);}throw new Exception(new JSONObject(bytes.toString("UTF-8")).optString("error","文件读取失败"));}}
-            if(connection.getContentLengthLong()>32*1024*1024)throw new Exception("文件超过 32 MB");
-            ByteArrayOutputStream bytes=new ByteArrayOutputStream();try(InputStream input=connection.getInputStream()){byte[] block=new byte[16384];int count;while((count=input.read(block))!=-1){if(bytes.size()+count>32*1024*1024)throw new Exception("文件超过 32 MB");bytes.write(block,0,count);}}return bytes.toByteArray();
+            long expected=connection.getContentLengthLong();
+            try(InputStream input=connection.getInputStream()){copyPreview(input,target,expected);}
         }finally{connections.remove(connection);connection.disconnect();}
+    }
+    static void copyPreview(InputStream input,java.io.OutputStream target,long expected)throws java.io.IOException {
+        long limit=32L*1024*1024;
+        if(expected>limit)throw new java.io.IOException("文件超过 32 MB");
+        byte[] block=new byte[16384];
+        long total=0;
+        int count;
+        while((count=input.read(block))!=-1){
+            total+=count;
+            if(total>limit)throw new java.io.IOException("文件超过 32 MB");
+            target.write(block,0,count);
+        }
+        if(expected>=0&&total!=expected)throw new java.io.IOException("文件传输未完成，请重试");
     }
     JSONObject upload(String threadId,String name,long size,InputStream source)throws Exception{
         if(size>PhoneAttachments.MAX_BYTES)throw new Exception("文件超过 32 MB");

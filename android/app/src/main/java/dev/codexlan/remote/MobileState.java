@@ -123,6 +123,13 @@ final class MobileState {
         JSONObject result=new JSONObject();java.util.Iterator<String> keys=source.keys();
         while(keys.hasNext()){String key=keys.next();result.put(key,source.get(key));}return result;
     }
+    private static boolean sameTurnOrder(JSONArray turns,JSONArray order) throws Exception {
+        if(order==null)return true;
+        if(turns.length()!=order.length())return false;
+        for(int i=0;i<order.length();i++)
+            if(!order.getString(i).equals(turns.getJSONObject(i).getString("id")))return false;
+        return true;
+    }
     static JSONObject merge(JSONObject previous, JSONObject incoming) throws Exception {
         if(incoming!=null&&"delta".equals(incoming.optString("sync"))&&(previous==null||incoming.optLong("baseVersion",-1)!=previous.optLong("version",-2)))throw new Exception("增量同步基线已变化，需要完整同步");
         LinkedHashMap<String, JSONObject> threads = new LinkedHashMap<>();
@@ -133,13 +140,28 @@ final class MobileState {
                 JSONObject thread = copyFields(values.getJSONObject(i));
                 if (source == previous) thread.put("ready", false).put("nativeQueueSupported",false).put("approvals", new JSONArray()).put("questions", new JSONArray());
                 String id = thread.getString("id"); JSONObject old = threads.get(id);
+                JSONArray received=thread.optJSONArray("turns");
+                JSONArray cached=old==null?null:old.optJSONArray("turns");
+                JSONArray requestedOrder=source==incoming?thread.optJSONArray("turnOrder"):null;
+                if(source==previous&&received!=null&&received.length()<=50){
+                    threads.put(id,thread);
+                    continue;
+                }
+                if(cached!=null&&(received==null||received.length()==0)&&sameTurnOrder(cached,requestedOrder)){
+                    thread.put("turns",cached);
+                    threads.put(id,thread);
+                    continue;
+                }
                 LinkedHashMap<String, JSONObject> turns = new LinkedHashMap<>();
                 for (JSONObject version : new JSONObject[] { old, thread }) {
                     JSONArray entries = version == null ? null : version.optJSONArray("turns"); if (entries == null) continue;
                     for (int j = 0; j < entries.length(); j++) {
-                        JSONObject next = copyFields(entries.getJSONObject(j)); String key = next.getString("id");
+                        JSONObject item=entries.getJSONObject(j);
+                        JSONObject next=version==old||source==previous?item:copyFields(item);
+                        String key=next.getString("id");
                         JSONObject prior = turns.get(key);
                         if (prior != null) {
+                            if(next==item)next=copyFields(item);
                             if (next.optString("input").isEmpty()) next.put("input", prior.optString("input"));
                             if (next.optJSONArray("agentMessages") == null || next.getJSONArray("agentMessages").length() == 0) next.put("agentMessages", prior.optJSONArray("agentMessages"));
                             if (next.optJSONArray("timeline") == null || next.getJSONArray("timeline").length() == 0) next.put("timeline", prior.optJSONArray("timeline"));

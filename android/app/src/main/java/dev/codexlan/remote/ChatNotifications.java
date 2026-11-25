@@ -62,9 +62,9 @@ final class ChatNotifications {
     void disconnected() {
         for (String tag : approvalTags) { manager.cancel(tag, 1); posted.remove(tag); } approvalTags.clear();
     }
-    void update(JSONObject previous, JSONObject current) throws Exception {
+    void update(JSONArray alerts) throws Exception {
         if (!manager.areNotificationsEnabled()) { disconnected(); return; }
-        JSONArray alerts = MobileState.alerts(previous, current); Set<String> active = new HashSet<>();
+        Set<String> active = new HashSet<>();
         for (int i = 0; i < alerts.length(); i++) {
             JSONObject alert = alerts.getJSONObject(i); String thread = alert.getString("threadId");
             if (alert.getString("kind").equals("result")) {
