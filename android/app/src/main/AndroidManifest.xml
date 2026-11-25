@@ -1,6 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -12,6 +13,7 @@
     <application android:label="Codex LAN 修复版" android:theme="@style/AppTheme" android:icon="@drawable/app_icon"
         android:allowBackup="false" android:usesCleartextTraffic="false" android:supportsRtl="true">
         <provider android:name=".PreviewProvider" android:authorities="${applicationId}.previews" android:exported="false" android:grantUriPermissions="true" />
+        <receiver android:name=".AppInstall" android:exported="false" />
         <activity android:name=".PairingScanActivity" android:exported="false" android:screenOrientation="portrait" />
         <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:windowSoftInputMode="adjustResize">
             <intent-filter>

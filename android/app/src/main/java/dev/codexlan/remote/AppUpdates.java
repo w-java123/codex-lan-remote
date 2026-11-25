@@ -2,7 +2,6 @@ package dev.codexlan.remote;
 
 import android.app.*;
 import android.content.*;
-import android.database.Cursor;
 import android.net.Uri;
 import android.os.*;
 import android.view.*;
@@ -20,7 +19,10 @@ final class AppUpdates {
     private final SharedPreferences preferences;
     private JSONObject available;
     private String desktop="",computer="";
-    private boolean applyingUpdate,checking,manualWanted,closed,started,skipResume;
+    private static final int INSTALL_PERMISSION=212;
+    private boolean checking,manualWanted,closed,started,skipResume;
+    private JSONObject permissionUpdate;
+    private Dialog installProgress;
     private TextView status,versions;
     private Dialog prompt,settings,permissionPrompt;
     private TextView installPermissionState;
@@ -55,6 +57,7 @@ final class AppUpdates {
     }
     private void checkingUi(boolean busy){if(checkButton!=null){checkButton.setEnabled(!busy);checkButton.setAlpha(busy?.55f:1);checkButton.setText(busy?"正在检查…":"立即检查");}if(progress!=null)progress.setVisibility(busy?View.VISIBLE:View.GONE);}
     void open(){
+        if(AppInstall.active(activity)){showInstallProgress();return;}
         if(settings!=null&&settings.isShowing())return;UiPalette palette=UiPalette.of(activity);Dialog dialog=new Dialog(activity);settings=dialog;dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);LinearLayout page=column();page.setPadding(dp(16),dp(12),dp(16),dp(12));page.setBackgroundColor(palette.background);page.setFitsSystemWindows(true);
         page.setOnApplyWindowInsetsListener((view,insets)->{if(Build.VERSION.SDK_INT>=30){android.graphics.Insets bars=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.ime());view.setPadding(dp(16)+bars.left,dp(8)+bars.top,dp(16)+bars.right,dp(12)+bars.bottom);}return insets;});
         LinearLayout bar=new LinearLayout(activity);bar.setGravity(Gravity.CENTER_VERTICAL);ImageButton back=new ImageButton(activity);back.setImageDrawable(new UiIcon("back",palette.foreground));back.setBackgroundColor(android.graphics.Color.TRANSPARENT);back.setContentDescription("返回");bar.addView(back,new LinearLayout.LayoutParams(dp(44),dp(48)));back.setOnClickListener(v->dialog.dismiss());TextView heading=text("检测更新",19);heading.setTypeface(null,android.graphics.Typeface.BOLD);bar.addView(heading);page.addView(bar);
@@ -67,6 +70,7 @@ final class AppUpdates {
         dialog.setContentView(page);dialog.setOnDismissListener(d->{if(settings==dialog){settings=null;status=null;versions=null;checkButton=null;progress=null;installPermissionState=null;}});dialog.show();if(dialog.getWindow()!=null){dialog.getWindow().setBackgroundDrawableResource(android.R.color.transparent);dialog.getWindow().setLayout(-1,-1);}check(true);
     }
     void check(boolean manual){
+        if(AppInstall.active(activity)){if(manual)showInstallProgress();return;}
         manualWanted|=manual;checkingUi(true);if(checking){if(manual&&status!=null)status.setText("正在检查…");return;}checking=true;if(status!=null)status.setText("正在检查 GitHub Release…");
         String current=installed();RemoteApi api=connection.get();
         worker.execute(()->{
@@ -79,7 +83,7 @@ final class AppUpdates {
     }
     void focus(){if(permissionPending&&offerInstallPermission())return;maybePrompt(false);}
     private boolean maybePrompt(boolean manual){
-        if(closed||permissionPageOpen||permissionPrompt!=null&&permissionPrompt.isShowing()||!manual&&!preferences.getBoolean("installPermissionAsked",false)&&!installAllowed()||available==null||!available.has("tag")||activity.isFinishing()||!manual&&!activity.hasWindowFocus()||prompt!=null&&prompt.isShowing())return false;
+        if(closed||AppInstall.active(activity)||permissionPageOpen||permissionPrompt!=null&&permissionPrompt.isShowing()||!manual&&!preferences.getBoolean("installPermissionAsked",false)&&!installAllowed()||available==null||!available.has("tag")||activity.isFinishing()||!manual&&!activity.hasWindowFocus()||prompt!=null&&prompt.isShowing())return false;
         String tag=available.optString("tag");
         String phoneVersion=available.optString("androidVersion"),pcVersion=available.optString("desktopVersion");
         boolean phone=available.has("android")&&UpdatePolicy.compare(phoneVersion,installed())>0&&(manual||!tag.equals(preferences.getString("ignoredAndroid","")));
@@ -111,52 +115,81 @@ final class AppUpdates {
     }
     private void requestInstallPermission(){
         preferences.edit().putBoolean("installPermissionAsked",true).apply();permissionPageOpen=true;Intent intent=new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+activity.getPackageName()));
-        try{activity.startActivityForResult(intent,209);}catch(ActivityNotFoundException unavailable){try{activity.startActivityForResult(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+activity.getPackageName())),209);toast("请在应用信息中查找安装未知应用权限");}catch(ActivityNotFoundException missing){permissionPageOpen=false;toast("请在系统设置中为 Codex LAN 开启安装应用权限");}}
+        try{activity.startActivityForResult(intent,INSTALL_PERMISSION);}catch(ActivityNotFoundException unavailable){try{activity.startActivityForResult(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+activity.getPackageName())),INSTALL_PERMISSION);toast("请在应用信息中查找安装未知应用权限");}catch(ActivityNotFoundException missing){permissionPageOpen=false;toast("请在系统设置中为 Codex LAN 开启安装应用权限");}}
     }
-    boolean activityResult(int request){if(request!=209)return false;permissionPageOpen=false;if(installPermissionState!=null)installPermissionState.setText(installPermissionLabel());toast(installAllowed()?"应用安装权限已开启":"可稍后在检测更新中开启安装权限");handler.postDelayed(startup,300);return true;}
+    boolean activityResult(int request){
+        if(request!=INSTALL_PERMISSION)return false;
+        permissionPageOpen=false;
+        if(installPermissionState!=null)installPermissionState.setText(installPermissionLabel());
+        JSONObject pending=permissionUpdate;
+        permissionUpdate=null;
+        if(pending!=null&&installAllowed())updateAndroid(pending);
+        else if(pending!=null)toast("开启应用安装权限后可继续更新");
+        else handler.postDelayed(startup,300);
+        return true;
+    }
     private void showCard(Dialog dialog,LinearLayout body){
         UiPalette palette=UiPalette.of(activity);ScrollView content=new ScrollView(activity);content.setFillViewport(false);content.setBackground(rounded(palette.dark?android.graphics.Color.rgb(35,35,35):android.graphics.Color.rgb(250,251,250),24));content.setClipToOutline(true);content.addView(body);dialog.setContentView(content);dialog.show();Window window=dialog.getWindow();if(window!=null){window.setBackgroundDrawableResource(android.R.color.transparent);window.setDimAmount(.45f);int width=Math.min(dp(380),activity.getResources().getDisplayMetrics().widthPixels-dp(32)),max=activity.getResources().getDisplayMetrics().heightPixels-dp(96);body.measure(View.MeasureSpec.makeMeasureSpec(width,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(0,View.MeasureSpec.UNSPECIFIED));window.setLayout(width,Math.min(body.getMeasuredHeight(),max));}
     }
-    private DownloadManager manager(){return (DownloadManager)activity.getSystemService(Context.DOWNLOAD_SERVICE);}
-    private int state(){long id=preferences.getLong("downloadId",-1);if(id<0)return -1;try(Cursor cursor=manager().query(new DownloadManager.Query().setFilterById(id))){return cursor!=null&&cursor.moveToFirst()?cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)):-1;}catch(Exception e){return -1;}}
-    private String downloadStatus(){int state=state();if(state==DownloadManager.STATUS_SUCCESSFUL)return "更新包已下载，可在下载列表中安装。";if(state==DownloadManager.STATUS_PENDING||state==DownloadManager.STATUS_RUNNING||state==DownloadManager.STATUS_PAUSED)return "更新包正在由系统下载，可在下载列表查看进度。";if(state==DownloadManager.STATUS_FAILED)return "上次下载失败，可重新检查并下载。";return "仅检测 GitHub 已发布的 Release，不检测代码提交。";}
+    private String downloadStatus(){
+        String progress=AppInstall.progress(activity);
+        return progress.isEmpty()?"准备好后可在 App 内安装更新。":progress;
+    }
     private void updateAndroid(JSONObject release){
-        if(applyingUpdate)return;
-        if(!installAllowed()){requestInstallPermission();return;}
-        String tag=release.optString("tag");
-        applyingUpdate=true;
-        if(status!=null)status.setText("正在检查并下载适用的增量…");
-        worker.execute(()->{
-            try{
-                java.io.File apk=ApkUpdateDownload.prepare(activity,release);
-                ui(()->{
-                    applyingUpdate=false;
-                    Uri uri=new Uri.Builder().scheme("content").authority(activity.getPackageName()+".previews")
-                        .appendPath(ApkUpdateDownload.PATH).appendPath(apk.getName()).build();
-                    try{
-                        activity.startActivity(new Intent(Intent.ACTION_VIEW).setDataAndType(uri,"application/vnd.android.package-archive")
-                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION));
-                    }catch(ActivityNotFoundException failure){offerFullUpdate(release,tag);}
-                });
-            }catch(Exception failure){ui(()->{applyingUpdate=false;offerFullUpdate(release,tag);});}
+        if(AppInstall.active(activity)){showInstallProgress();return;}
+        if(!installAllowed()){
+            permissionUpdate=release;
+            requestInstallPermission();
+            return;
+        }
+        AppInstall.start(activity,release);
+        showInstallProgress();
+    }
+    private void showInstallProgress(){
+        if(closed||activity.isFinishing()||installProgress!=null&&installProgress.isShowing())return;
+        Dialog dialog=new Dialog(activity);installProgress=dialog;
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout body=column();body.setPadding(dp(22),dp(20),dp(22),dp(16));
+        TextView title=text("更新 Codex LAN",20);title.setTypeface(null,android.graphics.Typeface.BOLD);body.addView(title);
+        TextView detail=text("",14);section(body,detail,8);
+        ProgressBar meter=new ProgressBar(activity,null,android.R.attr.progressBarStyleHorizontal);
+        meter.setMax(100);section(body,meter,8);
+        TextView confirm=button("继续安装",true,()->{
+            Intent action=AppInstall.takeConfirmation();
+            if(action!=null){
+                try{activity.startActivity(action);}catch(ActivityNotFoundException unavailable){
+                    toast("系统无法打开确认界面，请重新更新");
+                    AppInstall.cancelPending(activity);
+                }
+            }else{
+                AppInstall.cancelPending(activity);
+                dialog.dismiss();
+                check(true);
+            }
         });
-    }
-    private void offerFullUpdate(JSONObject release,String tag){
-        if(status!=null)status.setText("当前版本可使用完整安装包更新。");
-        new AlertDialog.Builder(activity).setTitle("下载完整安装包？")
-            .setMessage("当前版本没有可用的增量包，或增量校验未通过。")
-            .setNegativeButton("取消",null).setPositiveButton("下载",(dialog,which)->download(release.optJSONObject("android"),tag)).show();
-    }
-    private void download(JSONObject asset,String tag){
-        if(asset==null||UpdatePolicy.downloadUrl(asset.optString("url")).isEmpty()){toast("此版本尚无安卓安装包");return;}
-        int existing=state();if(tag.equals(preferences.getString("downloadTag",""))&&(existing==DownloadManager.STATUS_PENDING||existing==DownloadManager.STATUS_RUNNING||existing==DownloadManager.STATUS_PAUSED||existing==DownloadManager.STATUS_SUCCESSFUL)){downloads();return;}
-        try{String name=asset.optString("name").replaceAll("[^a-zA-Z0-9._-]","_");if(!name.endsWith(".apk"))throw new Exception("安装包格式无效");DownloadManager.Request request=new DownloadManager.Request(Uri.parse(asset.getString("url"))).setTitle("Codex LAN "+tag).setDescription("从 GitHub 下载应用更新").setMimeType("application/vnd.android.package-archive").setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED).setAllowedOverMetered(true);
-            name=name.substring(0,name.length()-4)+"-"+System.currentTimeMillis()+".apk";
-            if(Build.VERSION.SDK_INT>=29)request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS,name);else request.setDestinationInExternalFilesDir(activity,Environment.DIRECTORY_DOWNLOADS,name);
-            long id=manager().enqueue(request);preferences.edit().putLong("downloadId",id).putString("downloadTag",tag).apply();toast("已开始从 GitHub 下载，完成后可在系统下载列表安装");if(status!=null)status.setText(downloadStatus());
-        }catch(Exception e){toast("无法开始下载："+e.getMessage());}
+        section(body,confirm,12);
+        section(body,button("关闭",false,dialog::dismiss),8);
+        Runnable refresh=new Runnable(){
+            @Override public void run(){
+                if(closed||installProgress!=dialog||!dialog.isShowing())return;
+                boolean active=AppInstall.active(activity);
+                boolean pending=AppInstall.needsConfirmation(activity);
+                String stage=downloadStatus();
+                int percent=AppInstall.percent();
+                detail.setText(percent>=0?stage+" "+percent+"%":stage);
+                meter.setIndeterminate(percent<0);
+                if(percent>=0)meter.setProgress(percent);
+                meter.setVisibility(active&&!pending?View.VISIBLE:View.GONE);
+                confirm.setVisibility(pending?View.VISIBLE:View.GONE);
+                if(status!=null)status.setText(stage);
+                if(active)handler.postDelayed(this,250);
+            }
+        };
+        dialog.setOnDismissListener(d->{handler.removeCallbacks(refresh);if(installProgress==dialog)installProgress=null;});
+        showCard(dialog,body);
+        refresh.run();
     }
     private void downloads(){try{activity.startActivity(new Intent(DownloadManager.ACTION_VIEW_DOWNLOADS));}catch(ActivityNotFoundException e){toast("系统未提供下载列表，请在文件管理器查看 Downloads");}}
     private void browse(String page){try{activity.startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(page)));}catch(ActivityNotFoundException e){toast("请使用浏览器打开项目发布页");}}
-    void close(){closed=true;handler.removeCallbacks(startup);if(prompt!=null)prompt.dismiss();if(settings!=null)settings.dismiss();if(permissionPrompt!=null)permissionPrompt.dismiss();worker.shutdownNow();}
+    void close(){closed=true;handler.removeCallbacks(startup);if(prompt!=null)prompt.dismiss();if(settings!=null)settings.dismiss();if(permissionPrompt!=null)permissionPrompt.dismiss();if(installProgress!=null)installProgress.dismiss();worker.shutdownNow();}
 }
