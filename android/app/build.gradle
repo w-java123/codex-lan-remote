@@ -8,8 +8,8 @@ android {
         applicationId 'dev.codexlan.remote.memoryfix'
         minSdk 28
         targetSdk 35
-        versionCode 57
-        versionName '0.5.0-memoryfix.25'
+        versionCode 58
+        versionName '0.5.0-memoryfix.26'
         ndk { abiFilters 'arm64-v8a' }
     }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }

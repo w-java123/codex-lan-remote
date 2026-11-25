@@ -461,7 +461,19 @@ public final class MainActivity extends Activity {
         latestJump=text("↓ 回到最新",12,foreground);latestJump.setTextIsSelectable(false);latestJump.setGravity(android.view.Gravity.CENTER);latestJump.setPadding(dp(14),0,dp(14),0);latestJump.setBackground(rounded(surface(49,49,49),22));latestJump.setElevation(dp(4));latestJump.setOnClickListener(v->{if(chatAdapter.getCount()>0)scroll.setSelection(chatAdapter.getCount()-1);});FrameLayout.LayoutParams jumpParams=new FrameLayout.LayoutParams(-2,dp(40),android.view.Gravity.BOTTOM|android.view.Gravity.RIGHT);jumpParams.setMargins(0,0,dp(12),dp(10));transcript.addView(latestJump,jumpParams);latestJump.setVisibility(View.GONE);historyArea.addView(transcript,new LinearLayout.LayoutParams(0,-1,1));
         jumpRail=new ConversationRail(this,new ConversationRail.Listener(){public void preview(ConversationRail.Entry entry,int index,int count,float y){showRailPreview(entry,index,count,y);}public void commit(ConversationRail.Entry entry){jumpTo(entry.key);}public void end(){dismissRailPreview();}});
         jumpRail.setOnClickListener(v->jumpDialog());historyArea.addView(jumpRail,new LinearLayout.LayoutParams(dp(30),-1));railChat="";root.addView(historyArea,new LinearLayout.LayoutParams(-1,0,1));
-        scroll.setOnScrollListener(new AbsListView.OnScrollListener(){public void onScroll(AbsListView v,int first,int count,int total){highlightJumpRail(first);updateLatestJump();}public void onScrollStateChanged(AbsListView v,int state){listScrolling=state!=SCROLL_STATE_IDLE;if(!listScrolling&&deferredRows!=null){renderHandler.removeCallbacks(flushRows);java.util.List<ChatRows.Row> rows=deferredRows;deferredRows=null;applyRows(rows);}}});
+        scroll.setOnScrollListener(new AbsListView.OnScrollListener(){public void onScroll(AbsListView v,int first,int count,int total){highlightJumpRail(first);updateLatestJump();}public void onScrollStateChanged(AbsListView v,int state){
+            if(v!=scroll)return;
+            listScrolling=state!=SCROLL_STATE_IDLE;
+            if(!listScrolling&&deferredRows!=null){
+                // Leave the native scroll callback before replacing adapter rows.
+                renderHandler.post(()->{
+                    if(v==scroll&&!listScrolling&&deferredRows!=null){
+                        renderHandler.removeCallbacks(flushRows);
+                        flushRowsWhenStill();
+                    }
+                });
+            }
+        }});
         questionArea=new InlineQuestionsView(this,()->root.getHeight()-root.getPaddingTop()-root.getPaddingBottom());questionContent=vertical();questionArea.addView(questionContent);questionArea.setVisibility(View.GONE);questionSignature="";questionChat="";root.addView(questionArea,new LinearLayout.LayoutParams(-1,-2));
         LinearLayout dock = vertical(); dock.setPadding(dp(10),dp(4),dp(10),dp(8)); dock.setBackground(rounded(surface(38,38,38),24));
         queueChip=text("",12,accent);queueChip.setPadding(dp(12),dp(8),dp(12),dp(4));queueChip.setTextIsSelectable(false);queueChip.setVisibility(View.GONE);queueChip.setOnClickListener(v->queueDialog());dock.addView(queueChip);
