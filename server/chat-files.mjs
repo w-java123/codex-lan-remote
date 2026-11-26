@@ -36,6 +36,7 @@ export function messageFiles(value='', content=[]) {
 }
 export function findChatFile(thread,id) {
   for(const turn of thread?.turns||[])for(const row of turn.timeline||[])for(const file of row.files||[])if(file.id===id)return file;
+  for(const message of thread?.queuedMessages||[])for(const file of message.files||[])if(file.id===id)return file;
 }
 export async function readChatFile(reference,cwd,{maxBytes=32*1024*1024}={}) {
   if(!reference)throw Object.assign(Error('文件不在此聊天的可查看范围内'),{status:403});

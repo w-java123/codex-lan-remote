@@ -3,9 +3,10 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { turnTimeline, turnInput } from './turn-timeline.mjs';
 import { accountUsage } from './account-usage.mjs';
-import { desktopSidebar, groupThreads, PINNED_SECTION_ID } from './sidebar.mjs';
+import { desktopQueuedFollowUps, desktopSidebar, groupThreads, PINNED_SECTION_ID } from './sidebar.mjs';
 import { resolveDesktopBinary } from './desktop-binary.mjs';
 import { taskFailure } from './task-failure.mjs';
+import { messageFiles } from './chat-files.mjs';
 function nativeQueueRow(row){
   const inputs=row.input||[];
   const text=inputs.filter(item=>item.type==='text').map(item=>String(item.text||'')).join('\n');
@@ -16,7 +17,13 @@ function nativeQueueRow(row){
     return label?[label]:[];
   }):[];
   const prompt=hasAttachments?text.slice(text.indexOf(boundary)+boundary.length).trim()||files.join('、'):text;
-  return {id:row.id,clientUserMessageId:row.clientUserMessageId,serverQueue:true,prompt};
+  return {id:row.id,clientUserMessageId:row.clientUserMessageId,serverQueue:true,prompt,
+    files:messageFiles('',inputs)};
+}
+
+export function mergeQueuedRows(server, local) {
+  const known=new Set(server.flatMap(row=>[row.id,row.clientUserMessageId]).filter(Boolean));
+  return [...server,...local.filter(row=>typeof row?.id==='string'&&!known.has(row.id))];
 }
 
 export class HistoryReader {
@@ -90,16 +97,14 @@ export class HistoryReader {
     });
   }
   async localQueuedMessages(threadId){
-    const sidebar=await this.sidebarReader();const rows=sidebar['queued-follow-ups']?.[threadId];return Array.isArray(rows)?rows:[];
+    const byThread = this.sidebarReader===desktopSidebar ? await desktopQueuedFollowUps() : (await this.sidebarReader())['queued-follow-ups'];
+    const rows=Object.hasOwn(byThread??{},threadId)?byThread[threadId]:undefined;
+    return Array.isArray(rows)?rows:[];
   }
   async queuedMessages(threadId, liveRequest, onLocal){
     const local=await this.localQueuedMessages(threadId);
-    const merge=server=>{
-      const known=new Set(server.flatMap(row=>[row.id,row.clientUserMessageId]).filter(Boolean));
-      return [...server,...local.filter(row=>typeof row?.id==='string'&&!known.has(row.id))];
-    };
-    const previous=merge(this.serverQueues?.get(threadId)||[]);
-    if(liveRequest)onLocal?.(previous);
+    const previous=mergeQueuedRows(this.serverQueues?.get(threadId)||[],local);
+    onLocal?.(previous);
     let server=[];
     if(liveRequest||this.serverQueueSupported!==false){
       try{
@@ -115,7 +120,7 @@ export class HistoryReader {
         this.serverQueueSupported=false;
       }
     }
-    return merge(server);
+    return mergeQueuedRows(server,local);
   }
   hasNativeQueue(threadId){
     return this.serverQueues?.has(threadId)===true;

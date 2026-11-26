@@ -1,4 +1,6 @@
-import { watchDesktopSidebar } from './sidebar.mjs';
+import { watchDesktopQueue, watchDesktopSidebar } from './sidebar.mjs';
+import { mergeQueuedRows } from './history-reader.mjs';
+import { fileReference } from './chat-files.mjs';
 import { EventEmitter } from 'node:events';
 import { DesktopIpcClient } from './desktop-ipc.mjs';
 import { ThreadState, getTurns, summarizeThread, activeTurn } from './thread-state.mjs';
@@ -34,6 +36,11 @@ export class DesktopBridge extends EventEmitter {
       this.emit('sidebarChanged');
       const entry=this.entries.get(this.desktopSelection?.id);
       if(entry)void this.refreshQueue(entry,this.generation);
+    });
+    if (historyReader?.localQueuedMessages) this.stopQueueWatch = watchDesktopQueue(() => {
+      for (const entry of this.entries.values()) {
+        if (entry.ready || entry.id===this.desktopSelection?.id) void this.refreshLocalQueue(entry);
+      }
     });
     this.clientFactory = clientFactory;
     this.generation = 0;
@@ -424,13 +431,29 @@ export class DesktopBridge extends EventEmitter {
     return client?.initialized&&client.sharedOwner&&client.subscriptions.has(entry.id) ? client.request.bind(client) : undefined;
   }
 
+  async refreshLocalQueue(entry) {
+    const generation=this.generation;
+    const revision=entry.localQueueRevision=(entry.localQueueRevision||0)+1;
+    try {
+      const local=await this.historyReader.localQueuedMessages(entry.id);
+      if(this.closed||generation!==this.generation||entry.localQueueRevision!==revision||this.entries.get(entry.id)!==entry)return;
+      const previous=entry.nativeQueue||[];
+      const queue=mergeQueuedRows(previous.filter(row=>row.serverQueue),local);
+      if(JSON.stringify(queue)===JSON.stringify(previous))return;
+      entry.nativeQueue=queue;
+      entry.queueEpoch=(entry.queueEpoch||0)+1;
+      if(entry.queueLoading)entry.queueReload=true;
+      this.emit('changed');
+    } catch { /* A temporary read failure must not erase the last observed queue. */ }
+  }
+
   async refreshQueue(entry,generation){
     if(!this.historyReader?.queuedMessages||this.closed||generation!==this.generation)return;
     if(entry.queueLoading){entry.queueReload=true;return;}
     entry.queueLoading=true;const epoch=entry.queueEpoch||0;
     const publish=queue=>{
       if(this.closed||generation!==this.generation||this.entries.get(entry.id)!==entry||
-          (entry.queueEpoch||0)!==epoch||entry.nativeQueue===queue)return;
+          (entry.queueEpoch||0)!==epoch||JSON.stringify(entry.nativeQueue)===JSON.stringify(queue))return;
       entry.nativeQueue=queue;
       this.emit('changed');
     };
@@ -466,7 +489,7 @@ export class DesktopBridge extends EventEmitter {
     const entry=this.entries.get(threadId);
     return entry?.store.state?.cwd||(entry&&this.historyReader?.threadDirectories?.get(threadId));
   }
-  snapshot() {
+  snapshot({includeQueuedFilePaths=false}={}) {
     return [...this.entries.values()].map(entry => {
       const state = entry.store.state;
       const liveTurn=entry.ready?activeTurn(state):null;
@@ -491,7 +514,17 @@ export class DesktopBridge extends EventEmitter {
       return { id: entry.id, name: entry.name || '桌面聊天', ready: entry.ready||appToolsReady,
         ...(appToolsAvailable?{attachmentsSupported:nativeQueueSupported,nativeQueueSupported,modelSelectionSupported:this.canChooseAppToolsModel(entry)}:{}),
         queueSupported:appToolsAvailable||this.client?.sharedOwner?nativeQueueSupported:!!this.historyReader?.queuedMessages,
-        queuedMessages:(entry.nativeQueue||[]).slice(0,100).map(message=>({id:message.id,text:String(message.prompt||message.text||message.context?.prompt||[...message.context?.fileAttachments||[],...message.context?.imageAttachments||[]].map(row=>row.label||row.filename||'附件').join('、')).slice(0,16000),status:message.submission?.status||'queued',...(appToolsAvailable||this.client?.sharedOwner?{removable:nativeQueueSupported&&message.serverQueue===true}:{})})),
+        queuedMessages:(entry.nativeQueue||[]).slice(0,100).map(message=>{
+          const attachments=[...message.context?.fileAttachments||[],...message.context?.imageAttachments||[]];
+          const files=message.files??attachments.slice(0,24).flatMap(row=>{
+            const file=fileReference(row?.fsPath||row?.localPath,row?.label||row?.filename);
+            return file?[file]:[];
+          });
+          return {id:message.id,text:String(message.prompt||message.text||message.context?.prompt||files.map(file=>file.label).join('、')).slice(0,16000),
+            files:includeQueuedFilePaths?files:files.map(({id,name,label,kind})=>({id,name,label,kind})),
+            status:message.submission?.status||'queued',
+            ...(appToolsAvailable||this.client?.sharedOwner?{removable:nativeQueueSupported&&message.serverQueue===true}:{})};
+        }),
         model: appToolsModel?.model || state?.latestThreadSettings?.model || state?.latestModel || entry.modelSettings?.model || '', reasoningEffort:appToolsModel?.effort || state?.latestReasoningEffort || state?.latestThreadSettings?.effort || entry.modelSettings?.reasoningEffort || '',
         serviceTier:state?.latestThreadSettings?.serviceTier??'default',
         activity: entry.ready ? summary.activity : undefined,
@@ -706,5 +739,5 @@ export class DesktopBridge extends EventEmitter {
     entry.modelSettings=await this.client.readModelSettings(threadId,entry.owner);
     return {models:this.modelCatalog,current:{model:entry.modelSettings?.model||'',effort:entry.modelSettings?.reasoningEffort||'',serviceTier:entry.store.state?.latestThreadSettings?.serviceTier??'default'}};
   }
-  close() { this.stopSidebarWatch?.(); this.closed = true; ++this.generation; clearTimeout(this.reconnectTimer); clearInterval(this.refreshTimer);clearInterval(this.appToolsTimer);for(const entry of this.entries.values())clearTimeout(entry.repairTimer);this.client?.close(); this.historyReader?.close();this.autoTitles?.close();if(this.backgroundHistoryReader!==this.historyReader)this.backgroundHistoryReader?.close(); }
+  close() { this.stopSidebarWatch?.(); this.stopQueueWatch?.(); this.closed = true; ++this.generation; clearTimeout(this.reconnectTimer); clearInterval(this.refreshTimer);clearInterval(this.appToolsTimer);for(const entry of this.entries.values())clearTimeout(entry.repairTimer);this.client?.close(); this.historyReader?.close();this.autoTitles?.close();if(this.backgroundHistoryReader!==this.historyReader)this.backgroundHistoryReader?.close(); }
 }

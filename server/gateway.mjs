@@ -119,7 +119,7 @@ export function createGateway({ tls, bridge, uploads, desktopVersion = '', devic
         return;
       }
       if (request.method === 'GET' && url.pathname === '/v1/file') {
-        const thread=bridge.snapshot().find(thread=>thread.id===url.searchParams.get('threadId'));
+        const thread=bridge.snapshot({includeQueuedFilePaths:true}).find(thread=>thread.id===url.searchParams.get('threadId'));
         if(!thread)throw fail(403,'聊天不在授权范围内');
         const reference=findChatFile(thread,url.searchParams.get('id'));
         if(fileReads>=2)throw fail(429,'文件正在读取，请稍后重试');

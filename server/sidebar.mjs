@@ -1,6 +1,7 @@
 import { watchFile, unwatchFile } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
 import { homedir } from 'node:os';
 import path from 'node:path';
 export const PINNED_SECTION_ID='01984de2-8f74-7c91-a3b2-5c5e937cf318';
@@ -14,6 +15,30 @@ export function watchDesktopSidebar(onChange, root = process.env.CODEX_HOME || p
   watchFile(file, { interval: 500, persistent: false }, onChange);
   return () => unwatchFile(file, onChange);
 }
+const desktopHome = () => process.env.CODEX_HOME || path.join(homedir(), '.codex');
+const desktopStateDatabase = '.codex-global-state.sqlite';
+
+export async function desktopQueuedFollowUps(root = desktopHome()) {
+  const filename = path.join(root, desktopStateDatabase);
+  try { await stat(filename); }
+  catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return (await desktopSidebar(root))['queued-follow-ups'];
+  }
+  const database = new DatabaseSync(filename, {readOnly:true});
+  try {
+    const row = database.prepare('SELECT value FROM settings WHERE scope = ? AND key = ?')
+      .get('global', 'queued-follow-ups');
+    return row ? JSON.parse(row.value) : {};
+  } finally { database.close(); }
+}
+
+export function watchDesktopQueue(onChange, root = desktopHome()) {
+  const files = [desktopStateDatabase, desktopStateDatabase + '-wal'].map(name => path.join(root, name));
+  for (const file of files) watchFile(file, {interval:500,persistent:false}, onChange);
+  return () => { for (const file of files) unwatchFile(file, onChange); };
+}
+
 export function groupThreads(threads, state = {}) {
   const projects = Object.values(state['local-projects'] || {});
   const assignments = state['thread-project-assignments'] || {};
