@@ -51,7 +51,7 @@ final class MobileState {
     }
     static String composerAction(JSONObject state, JSONObject thread, boolean sending, String draft,String mode) {
         boolean hasInput=draft!=null&&!draft.trim().isEmpty();
-        if(canUseNativeQueue(state,thread,sending)&&"active".equals(thread.optString("runtimeStatus")))
+        if(activeTurnId(thread).isEmpty()&&canUseNativeQueue(state,thread,sending)&&"active".equals(thread.optString("runtimeStatus")))
             return hasInput&&!"steer".equals(mode)?"queue":"none";
         if (!unavailableReason(state,thread,sending).isEmpty()) return "none";
         boolean active=!activeTurnId(thread).isEmpty(), hasText=hasInput;
